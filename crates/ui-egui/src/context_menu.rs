@@ -1669,7 +1669,7 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
                     picked = Some(item.clone());
                 }
                 if item.enabled {
-                    resp.on_hover_text(crate::i18n::tr_label(&item.shortcut).to_string());
+                    resp.on_hover_text(crate::keymap::display(crate::i18n::tr_label(&item.shortcut)));
                 }
             }
         });
@@ -1789,7 +1789,7 @@ pub fn list_row_lit(ui: &mut egui::Ui, item: &Item, lit: bool) -> Option<Item> {
     let display_label = crate::i18n::tr_label(&item.label);
     ui.painter().text(pos2(r.left() + 32.0, r.center().y), Align2::LEFT_CENTER, display_label, FontId::proportional(13.0), text);
     if !item.shortcut.is_empty() {
-        let display_shortcut = crate::i18n::tr_label(&item.shortcut);
+        let display_shortcut = crate::keymap::display(crate::i18n::tr_label(&item.shortcut));
         ui.painter().text(pos2(r.right() - 10.0, r.center().y), Align2::RIGHT_CENTER, display_shortcut, FontId::proportional(11.5), t.text_dim);
     }
     (item.enabled && resp.clicked()).then(|| item.clone())

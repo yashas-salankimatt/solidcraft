@@ -15,11 +15,34 @@ CommandSpec::new("view.navigate", "Navigate View", navigate)
     .icon("orbit")
     .noundo()
     .doc_only()
-    .params("camera: Camera; direction?: [x,y,z] in the camera's up-axis frame; or action: left|right|up|down|clockwise|counterclockwise|home|fit, degrees?: 0..180 (how far left|right|up|down turn; default 90); or motion: pan|orbit|zoom, delta?: [dx,dy] (pixels, each ±10000), viewport?: [width,height] (1..1000000, required for pan or pivot), pivot?: [x,y,z], factor?: 0.05..20 (required for zoom), anchor?: [x,y,z] → camera, fit, continuous?")];
+    .params("camera: Camera; direction?: [x,y,z] in the camera's up-axis frame; or action: left|right|up|down|clockwise|counterclockwise|home|fit, degrees?: 0..180 (how far left|right|up|down turn; default 90); or motion: pan|orbit|zoom, delta?: [dx,dy] (pixels, each ±10000), viewport?: [width,height] (1..1000000, required for pan or pivot), pivot?: [x,y,z], factor?: 0.05..20 (required for zoom), anchor?: [x,y,z] → camera, fit, continuous?"),
+// The standard views, Fit and Home as commands of their own, so a key can be bound to each
+// (shortcut presets); in the window they move its camera, from a script they answer a camera.
+// A standard view is a built-in named view: Restore Named View's icon.
+CommandSpec::new("view.front", "Front View", front).icon("camera").noundo().doc_only().params(STANDARD),
+CommandSpec::new("view.back", "Back View", back).icon("camera").noundo().doc_only().params(STANDARD),
+CommandSpec::new("view.left", "Left View", left).icon("camera").noundo().doc_only().params(STANDARD),
+CommandSpec::new("view.right", "Right View", right).icon("camera").noundo().doc_only().params(STANDARD),
+CommandSpec::new("view.top", "Top View", top).icon("camera").noundo().doc_only().params(STANDARD),
+CommandSpec::new("view.bottom", "Bottom View", bottom).icon("camera").noundo().doc_only().params(STANDARD),
+CommandSpec::new("view.iso", "Isometric View", iso).icon("camera").noundo().doc_only().params(STANDARD),
+CommandSpec::new("view.fit", "Fit View", fit)
+    .icon("fit")
+    .noundo()
+    .doc_only()
+    .params("camera: Camera → camera, fit: true (the window frames what is shown, or the selection)"),
+CommandSpec::new("view.home", "Home View", home)
+    .icon("home")
+    .noundo()
+    .doc_only()
+    .params("camera: Camera → camera turned to the isometric view, fit: true (the window frames what is shown)"),
+];
 
-fn navigate(_s: &mut Session, p: &Value) -> Result<Value> {
-    let cmd = "view.navigate";
-    let mut cam: Camera =
+const STANDARD: &str = "camera: Camera → camera turned to this standard view (target and distance kept), fit: false";
+
+/// The `camera` parameter, checked.
+fn camera(cmd: &str, p: &Value) -> Result<Camera> {
+    let cam: Camera =
         serde_json::from_value(p.get("camera").cloned().ok_or_else(|| bad(cmd, "camera is required"))?).map_err(|_| bad(cmd, "invalid camera"))?;
     if !cam.is_valid()
         || !cam.fov.is_finite()
@@ -30,6 +53,65 @@ fn navigate(_s: &mut Session, p: &Value) -> Result<Value> {
     {
         return Err(bad(cmd, "invalid camera"));
     }
+    Ok(cam)
+}
+
+fn standard(cmd: &str, p: &Value, view: StandardView) -> Result<Value> {
+    let mut cam = camera(cmd, p)?;
+    cam.set_view(view);
+    Ok(json!({"camera": cam, "fit": false}))
+}
+
+fn front(_s: &mut Session, p: &Value) -> Result<Value> {
+    standard("view.front", p, StandardView::Front)
+}
+fn back(_s: &mut Session, p: &Value) -> Result<Value> {
+    standard("view.back", p, StandardView::Back)
+}
+fn left(_s: &mut Session, p: &Value) -> Result<Value> {
+    standard("view.left", p, StandardView::Left)
+}
+fn right(_s: &mut Session, p: &Value) -> Result<Value> {
+    standard("view.right", p, StandardView::Right)
+}
+fn top(_s: &mut Session, p: &Value) -> Result<Value> {
+    standard("view.top", p, StandardView::Top)
+}
+fn bottom(_s: &mut Session, p: &Value) -> Result<Value> {
+    standard("view.bottom", p, StandardView::Bottom)
+}
+fn iso(_s: &mut Session, p: &Value) -> Result<Value> {
+    standard("view.iso", p, StandardView::Iso)
+}
+fn fit(_s: &mut Session, p: &Value) -> Result<Value> {
+    Ok(json!({"camera": camera("view.fit", p)?, "fit": true}))
+}
+fn home(_s: &mut Session, p: &Value) -> Result<Value> {
+    let mut cam = camera("view.home", p)?;
+    cam.set_view(StandardView::Iso);
+    Ok(json!({"camera": cam, "fit": true}))
+}
+
+/// The window's view name for a camera command (`front`, `fit`, `home`…), for the UI to move its
+/// own camera the way its view controls do.
+pub fn window_view(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "view.front" => "front",
+        "view.back" => "back",
+        "view.left" => "left",
+        "view.right" => "right",
+        "view.top" => "top",
+        "view.bottom" => "bottom",
+        "view.iso" => "iso",
+        "view.fit" => "fit",
+        "view.home" => "home",
+        _ => return None,
+    })
+}
+
+fn navigate(_s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "view.navigate";
+    let mut cam = camera(cmd, p)?;
     if p.get("motion").is_some() {
         return continuous(cam, p);
     }
@@ -169,6 +251,36 @@ mod tests {
         for bad in [json!(0), json!(-15), json!(181), json!(f64::NAN.to_string()), json!("15"), json!(null)] {
             assert!(turn("left", Some(bad.clone())).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn standard_views_fit_and_home_answer_a_camera_without_editing_the_design() {
+        let mut s = Session::default();
+        let before = s.doc.to_json();
+        let cam = Camera { yaw: 0.3, pitch: 0.2, roll: 0.4, distance: 80.0, ..Default::default() };
+        for (id, view) in [
+            ("view.front", StandardView::Front),
+            ("view.back", StandardView::Back),
+            ("view.left", StandardView::Left),
+            ("view.right", StandardView::Right),
+            ("view.top", StandardView::Top),
+            ("view.bottom", StandardView::Bottom),
+            ("view.iso", StandardView::Iso),
+        ] {
+            let r = s.execute(id, &json!({"camera": cam})).unwrap();
+            let to: Camera = serde_json::from_value(r["camera"].clone()).unwrap();
+            let mut expect = cam;
+            expect.set_view(view);
+            assert_eq!((to.yaw, to.pitch, to.roll, to.target, to.distance), (expect.yaw, expect.pitch, 0.0, cam.target, cam.distance), "{id}");
+            assert_eq!(r["fit"], false);
+            assert_eq!(window_view(id), Some(id.trim_start_matches("view.")));
+        }
+        assert_eq!(s.execute("view.fit", &json!({"camera": cam})).unwrap()["fit"], true);
+        assert_eq!(s.execute("view.home", &json!({"camera": cam})).unwrap()["fit"], true);
+        for bad in [json!({}), json!({"camera": {"distance": -1}}), json!({"camera": "front"})] {
+            assert!(s.execute("view.top", &bad).is_err(), "{bad}");
+        }
+        assert_eq!(s.doc.to_json(), before);
     }
 
     #[test]

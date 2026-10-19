@@ -36,6 +36,7 @@ mod face;
 mod features;
 mod features_more;
 pub use features::{auto_operation, extrude_reach};
+pub use view_navigation::window_view;
 mod component_link;
 mod config;
 mod file;
