@@ -87,6 +87,8 @@ mod surface_errors_tests;
 #[cfg(test)]
 mod timeline_marks_tests;
 #[cfg(test)]
+mod touch_mode_ui_tests;
+#[cfg(test)]
 mod touch_ui_tests;
 #[cfg(test)]
 mod status_tests {
@@ -197,6 +199,7 @@ pub mod toolbar;
 pub mod toolbar_custom;
 pub mod tools;
 pub(crate) mod touch;
+pub mod touch_mode;
 pub mod update;
 pub mod viewport;
 mod viewport_layout;
@@ -407,6 +410,10 @@ pub struct SolveApp {
     /// waits for the next frame.
     touch_raw: touch::RawTouch,
     touch_waiting: bool,
+    /// Whether the host's main pointer is a finger (a tablet or phone browser): touch mode's
+    /// Automatic setting turns it on ([`touch_mode`]).
+    pub touch_first: bool,
+    pub(crate) touch_ui: touch_mode::TouchUi,
     control_rx: Option<Receiver<ControlRequest>>,
     /// Control requests that change the design, held while a file loads.
     control_held: std::collections::VecDeque<ControlRequest>,
@@ -508,6 +515,8 @@ impl SolveApp {
             synthetic_mods: egui::Modifiers::default(),
             touch_raw: Default::default(),
             touch_waiting: false,
+            touch_first: false,
+            touch_ui: Default::default(),
             control_rx: None,
             agent_chat: Default::default(),
             control_held: Default::default(),
@@ -1434,7 +1443,11 @@ impl SolveApp {
                 return;
             }
         }
-        toolbar::toolbar(self, ui);
+        if touch_mode::active(self) && !render_workspace::active(self) {
+            touch_mode::column(self, ui);
+        } else {
+            toolbar::toolbar(self, ui);
+        }
         let show_timeline = self.ui.show_timeline && !render_workspace::active(self);
         let left_timeline = show_timeline && self.preferences.timeline_left;
         if show_timeline && !left_timeline {

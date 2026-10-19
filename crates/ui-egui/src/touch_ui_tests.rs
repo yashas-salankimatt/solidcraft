@@ -16,7 +16,7 @@ fn button(pos: Pos2, pressed: bool) -> Event {
 }
 
 /// The first finger lands (it drives the pointer); a later finger only reports its touch.
-fn down(id: u64, pos: Pos2) -> Vec<Event> {
+pub(crate) fn down(id: u64, pos: Pos2) -> Vec<Event> {
     if id == 1 {
         vec![touch(id, TouchPhase::Start, pos), Event::PointerMoved(pos), button(pos, true)]
     } else {
@@ -24,16 +24,16 @@ fn down(id: u64, pos: Pos2) -> Vec<Event> {
     }
 }
 
-fn moved(id: u64, pos: Pos2) -> Vec<Event> {
+pub(crate) fn moved(id: u64, pos: Pos2) -> Vec<Event> {
     if id == 1 { vec![touch(id, TouchPhase::Move, pos), Event::PointerMoved(pos)] } else { vec![touch(id, TouchPhase::Move, pos)] }
 }
 
-fn up(id: u64, pos: Pos2) -> Vec<Event> {
+pub(crate) fn up(id: u64, pos: Pos2) -> Vec<Event> {
     if id == 1 { vec![touch(id, TouchPhase::End, pos), button(pos, false), Event::PointerGone] } else { vec![touch(id, TouchPhase::End, pos)] }
 }
 
 /// A box in view, nothing selected; the viewport's centre is on it.
-fn boxed() -> (Harness, egui::Rect) {
+pub(crate) fn boxed() -> (Harness, egui::Rect) {
     let mut h = Harness::new();
     h.app.run("solid.box", json!({"length": 40, "width": 30, "height": 20})).unwrap();
     h.app.fit_view();
