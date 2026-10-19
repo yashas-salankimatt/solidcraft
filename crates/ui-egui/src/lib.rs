@@ -602,6 +602,7 @@ impl SolveApp {
             "recent_opened_at": self.home.opened_at,
             "shortcut_box": self.sbox.prefs(),
             "shortcuts": self.keymap.prefs(),
+            "shortcut_preset": keymap::preset(&self.keymap.preset).id,
             "toolbar": self.toolbar_custom.prefs(),
             "autosave_minutes": self.autosave_minutes,
             "ground_shadow": self.ui.ground_shadow,
@@ -655,7 +656,7 @@ impl SolveApp {
             self.sbox.load(s);
         }
         if let Some(s) = v.get("shortcuts") {
-            self.keymap.load(s);
+            keymap::load_checked(self, v.get("shortcut_preset").and_then(Value::as_str), s);
         }
         if let Some(t) = v.get("toolbar") {
             self.toolbar_custom.load(t);
@@ -700,7 +701,7 @@ impl SolveApp {
                     self.preferences.supersampling_adaptive = v.get("supersampling_adaptive").and_then(Value::as_bool).unwrap_or(true);
                 }
             }
-            if id == "view.navigate" {
+            if id == "view.navigate" || solidcraft_engine::window_view(id).is_some() {
                 let to: Camera = serde_json::from_value(v.get("camera").cloned().unwrap_or_default()).map_err(|e| e.to_string())?;
                 if v.get("continuous").and_then(Value::as_bool).unwrap_or(false) {
                     self.cancel_view_animation();
@@ -792,6 +793,11 @@ impl SolveApp {
         {
             let label = self.tr_label(info.label).to_string();
             self.set_status(format!("{label}: {why}"), true);
+            return;
+        }
+        // A standard view, Fit or Home (a key bound to one): the window's camera moves.
+        if let Some(view) = solidcraft_engine::window_view(id) {
+            self.animate_view(view);
             return;
         }
         if id == "material.properties.validate" {
@@ -1081,6 +1087,10 @@ impl SolveApp {
     }
 
     pub fn open_path(&mut self, path: &str) {
+        if keymap::is_shortcuts_file(path) {
+            keymap::import_file(self, path);
+            return;
+        }
         self.home.open = false;
         documents::prepare_open(self);
         if let Ok(r) = self.run("doc.open", json!({ "path": path })) {
@@ -1113,6 +1123,11 @@ impl SolveApp {
     /// A dropped file: a STEP or mesh file (3MF, STL, OBJ, glTF) joins a design that has features, anything else
     /// opens.
     pub fn drop_path(&mut self, path: &str) {
+        // A shortcuts file (Keyboard Shortcuts › Export…): its keys, not a design.
+        if keymap::is_shortcuts_file(path) {
+            keymap::import_file(self, path);
+            return;
+        }
         let import = solidcraft_engine::io::is_step_path(path) || solidcraft_engine::io::is_mesh_path(path);
         if import && !self.session.doc.features.is_empty() {
             self.insert_path_async(path);

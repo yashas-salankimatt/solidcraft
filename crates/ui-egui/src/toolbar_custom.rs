@@ -197,16 +197,35 @@ pub fn run(app: &mut SolveApp, action: &str, p: &Value) {
 
 /// Shortcut keys, S box favourites and the toolbar as one file (Keyboard Shortcuts › Export).
 pub fn export(app: &SolveApp) -> Value {
-    json!({ "format": "solidcraft-shortcuts/1", "shortcuts": app.keymap.prefs(), "favourites": app.sbox.pinned, "toolbar": app.toolbar_custom.prefs() })
+    json!({
+        "format": "solidcraft-shortcuts/1",
+        "preset": crate::keymap::preset(&app.keymap.preset).id,
+        "navigation": app.preferences.nav,
+        "shortcuts": app.keymap.prefs(),
+        "favourites": app.sbox.pinned,
+        "toolbar": app.toolbar_custom.prefs(),
+    })
 }
 
-pub fn import(app: &mut SolveApp, v: &Value) -> Result<(), String> {
+/// Whether `v` is a shortcuts file ([`export`]'s format).
+pub fn is_shortcuts(v: &Value) -> bool {
     // "solvecraft-shortcuts/1": files exported before the rename (compatibility shim).
-    if !matches!(v.get("format").and_then(Value::as_str), Some("solidcraft-shortcuts/1" | "solvecraft-shortcuts/1")) {
+    matches!(v.get("format").and_then(Value::as_str), Some("solidcraft-shortcuts/1" | "solvecraft-shortcuts/1"))
+}
+
+/// Take a shortcuts file's keys (its preset and the changes on top; a file from before presets
+/// starts from SolidCraft's), mouse preset, S box favourites and toolbar. Returns the keys left
+/// out (unknown commands, keys SolidCraft keeps for itself).
+pub fn import(app: &mut SolveApp, v: &Value) -> Result<Vec<String>, String> {
+    if !is_shortcuts(v) {
         return Err("not a SolidCraft shortcuts file".into());
     }
+    let mut left_out = Vec::new();
     if let Some(s) = v.get("shortcuts") {
-        app.keymap.load(s);
+        left_out = crate::keymap::load_checked(app, v.get("preset").and_then(Value::as_str), s);
+    }
+    if let Some(nav) = v.get("navigation").and_then(Value::as_str).filter(|n| crate::prefs::NAV_PRESETS.iter().any(|p| p.id == *n)) {
+        crate::prefs::set_nav(app, nav);
     }
     if let Some(f) = v.get("favourites").and_then(Value::as_array) {
         app.sbox.pinned = f.iter().take(64).filter_map(|x| x.as_str().map(str::to_string)).collect();
@@ -214,7 +233,7 @@ pub fn import(app: &mut SolveApp, v: &Value) -> Result<(), String> {
     if let Some(t) = v.get("toolbar") {
         app.toolbar_custom.load(t);
     }
-    Ok(())
+    Ok(left_out)
 }
 
 /// Customize Toolbar: every command of the tab's panels with a check box (on the toolbar or

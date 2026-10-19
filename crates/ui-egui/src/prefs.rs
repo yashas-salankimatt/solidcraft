@@ -96,7 +96,7 @@ use NavButton::{Left, Middle, Right};
 use NavMode::{Orbit, Pan, Zoom};
 
 /// The mouse mappings. The first is the default.
-pub const NAV_PRESETS: [NavPreset; 8] = [
+pub const NAV_PRESETS: [NavPreset; 9] = [
     NavPreset {
         id: "fusion",
         label: "Fusion",
@@ -157,6 +157,13 @@ pub const NAV_PRESETS: [NavPreset; 8] = [
         bindings: &[bind(Right, NavKeys::SHIFT, Pan), bind(Right, NavKeys::NONE, Orbit), bind(Middle, NavKeys::NONE, Pan)],
     },
     NavPreset {
+        id: "onshape",
+        label: "Onshape",
+        help: "Right drag orbits, middle or Ctrl+right drag pans",
+        reverse_zoom: false,
+        bindings: &[bind(Right, NavKeys::CTRL, Pan), bind(Right, NavKeys::NONE, Orbit), bind(Middle, NavKeys::NONE, Pan)],
+    },
+    NavPreset {
         id: OPENSCAD_NAV,
         label: "OpenSCAD",
         help: "Left drag on empty space orbits, Shift+left drag box-selects, sketch geometry drags edit; right or middle drag pans, Shift+right or Shift+middle drag zooms",
@@ -206,6 +213,14 @@ impl Prefs {
 /// The preset with this id (the default for an unknown one).
 pub fn nav_preset(id: &str) -> &'static NavPreset {
     NAV_PRESETS.iter().find(|p| p.id == id).unwrap_or(&NAV_PRESETS[0])
+}
+
+/// Switch to the mouse preset `id` (an unknown one is the default) with its zoom direction, as
+/// Navigation › Pan, zoom, orbit does.
+pub fn set_nav(app: &mut SolveApp, id: &str) {
+    let p = nav_preset(id);
+    app.preferences.nav = p.id.to_string();
+    app.preferences.zoom_reverse = p.reverse_zoom;
 }
 /// The dialog's pages, in order.
 pub const PAGES: [&str; 9] = ["General", "Navigation", "Keyboard Shortcuts", "Design", "Graphics", "Sketch", "Selection", "AI", "Plugins"];
@@ -558,6 +573,7 @@ struct Snapshot {
     autosave: f64,
     auto_project: bool,
     keys: std::collections::BTreeMap<String, String>,
+    key_preset: String,
 }
 
 impl Snapshot {
@@ -574,6 +590,7 @@ impl Snapshot {
             autosave: app.autosave_minutes,
             auto_project: app.session.auto_project,
             keys: app.keymap.custom.clone(),
+            key_preset: app.keymap.preset.clone(),
         }
     }
     fn restore(self, app: &mut SolveApp) {
@@ -593,6 +610,7 @@ impl Snapshot {
         set_autosave(app);
         app.session.auto_project = self.auto_project;
         app.keymap.custom = self.keys;
+        app.keymap.preset = self.key_preset;
         if app.preferences.msaa != msaa {
             save_graphics(app);
         }
@@ -791,7 +809,10 @@ fn defaults(app: &mut SolveApp, page: usize) {
             p.look_at_speed = d.look_at_speed;
             p.middle_double_click = d.middle_double_click;
         }
-        PAGE_SHORTCUTS => crate::keymap::reset(app, None),
+        PAGE_SHORTCUTS => {
+            crate::keymap::reset(app, None);
+            app.keymap.preset = crate::keymap::PRESETS[0].id.to_string();
+        }
         PAGE_DESIGN => {
             p.up_axis = d.up_axis;
             p.offer_stand_up = d.offer_stand_up;

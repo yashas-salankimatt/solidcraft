@@ -98,6 +98,7 @@ fn execute(app: &mut SolveApp, id: &str, params: Value) -> Result<Value, String>
     let r = app.run(id, params);
     if r.is_ok()
         && !matches!(id, "view.navigate" | "view.ambient_occlusion" | "view.graphics_preset")
+        && solidcraft_engine::window_view(id).is_none()
         && app.session.active_sketch.is_none()
         && app.session.world_state().bodies.len() == 1
         && app.session.undo.len() <= 2
@@ -683,7 +684,14 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
             None => ok(json!({"pending": app.menu.confirm.as_ref().map(|c| c.report.clone())})),
         },
         "ui.shortcut" => {
-            let Some(id) = s("command") else { return err("missing `command`") };
+            // A preset: its keys (the user's changes go) and its mouse preset.
+            if let Some(preset) = s("preset") {
+                return match crate::keymap::apply_preset(app, preset) {
+                    Ok(()) => ok(json!({"preset": app.keymap.preset, "nav": app.preferences.nav})),
+                    Err(e) => err(e),
+                };
+            }
+            let Some(id) = s("command") else { return err("missing `command` (or `preset`)") };
             match s("key") {
                 Some(k) => match crate::keymap::bind(app, id, k, b("replace")) {
                     Ok(()) => ok(json!({"command": id, "key": crate::keymap::effective(app, id)})),
