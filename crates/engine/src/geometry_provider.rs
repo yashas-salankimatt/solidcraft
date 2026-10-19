@@ -237,7 +237,7 @@ pub fn status() -> Value {
         }
         None if cfg!(target_arch = "wasm32") => json!({
             "installed": false,
-            "message": "the browser build has no geometry provider: features SolidCraft's kernel cannot build fail as they do without one",
+            "message": "the browser build has no geometry provider: a feature SolidCraft's kernel cannot build shows the result a provider made when the design saved one, and fails otherwise",
         }),
         None => json!({
             "installed": false,
