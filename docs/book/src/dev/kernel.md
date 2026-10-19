@@ -26,6 +26,14 @@ offset, Delete Face, Split Face, Replace Face, sewing, STEP and IGES reading and
 truck's parser, and face provenance (which input face each output face came from, for
 [persistent naming](naming.md)).
 
+## Geometry providers
+
+When a feature's Boolean fails with a geometry error and the application has installed a
+geometry provider (another kernel, run as a separate program), `kernel::provider` hands the
+Boolean to it, checks the result without the Boolean that failed, and keeps it only if it
+passes. The feature records what was tried and says so. With no provider installed nothing
+changes. See [`docs/geometry-providers.md`](https://github.com/yashas-salankimatt/solidcraft/blob/hybrid/docs/geometry-providers.md).
+
 ## Vendored truck crates
 
 Patched copies of `truck-shapeops`, `truck-stepio` and `truck-meshalgo` live in `vendor/`,

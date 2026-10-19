@@ -230,11 +230,13 @@ fn inspect(s: &mut Session, p: &Value) -> Result<Value> {
         .enumerate()
         .map(|(i, f)| {
             let r = s.model.result(f.id);
-            json!({
+            let mut entry = json!({
                 "id": f.id, "name": f.name, "type": f.kind.type_name(), "suppressed": f.suppressed, "rolled_back": i >= marker,
                 "error": r.and_then(|r| r.error.clone()), "warning": r.and_then(|r| r.warning.clone()), "ms": r.map(|r| r.ms),
                 "boolean_diagnostics": r.map(|r| &r.boolean_diagnostics),
-            })
+            });
+            with_geometry_fallbacks(&mut entry, r);
+            entry
         })
         .collect();
     let with_measure = bool_(p, "measure").unwrap_or(false);
@@ -264,6 +266,16 @@ fn inspect(s: &mut Session, p: &Value) -> Result<Value> {
         "params": params, "timeline": timeline, "bodies": bodies, "sketches": sketches,
         "selection": s.selection, "undo": s.undo.len(), "redo": s.redo.len(), "hidden_origin": s.visibility.hidden_origin,
     }))
+}
+
+/// Add a feature's `geometry_fallbacks` (operations handed to a geometry provider) to its
+/// inspection, when it has any: a design that never needed one reads exactly as before.
+pub(crate) fn with_geometry_fallbacks(entry: &mut Value, result: Option<&solidcraft_doc::FeatureResult>) {
+    if let Some(r) = result.filter(|r| !r.geometry_fallbacks.is_empty())
+        && let Some(entry) = entry.as_object_mut()
+    {
+        entry.insert("geometry_fallbacks".into(), json!(r.geometry_fallbacks));
+    }
 }
 
 fn body_of<'a>(st: &'a solidcraft_doc::ModelState, p: &Value, cmd: &str) -> Result<&'a solidcraft_doc::ModelBody> {
