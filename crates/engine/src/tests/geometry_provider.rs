@@ -39,17 +39,17 @@ impl GeometryProvider for Answer {
 /// the Boolean property tests): the first is body `A`, the second joins it.
 const CROSSING: f64 = 12.5;
 
-fn first(s: &mut Session) {
+pub(crate) fn first(s: &mut Session) {
     run(s, "solid.cylinder", json!({"base": [5, 22.5, 5], "axis": "Y", "radius": CROSSING, "height": 12.5, "body_name": "A"}));
 }
 
-fn crossing() -> Value {
+pub(crate) fn crossing() -> Value {
     json!({"base": [0, 27.5, 2.5], "axis": "X", "radius": CROSSING, "height": 5, "operation": "join", "targets": ["A"], "name": "Crossing"})
 }
 
 /// The join as another kernel would give it, standing in for one: the second cylinder 2 µm
 /// thinner, which the kernel can join, and well inside what the checks allow for chords.
-fn near_answer() -> String {
+pub(crate) fn near_answer() -> String {
     let a = solidcraft_kernel::cylinder(Vec3::new(5., 22.5, 5.), Vec3::Y, CROSSING, 12.5).unwrap();
     let b = solidcraft_kernel::cylinder(Vec3::new(0., 27.5, 2.5), Vec3::X, CROSSING - 0.002, 5.).unwrap();
     let joined = solidcraft_kernel::boolean(&a, &b, solidcraft_kernel::BoolOp::Union).unwrap().unwrap();

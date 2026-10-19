@@ -308,7 +308,7 @@ mod boolean_diagnostics;
 mod component_frames;
 mod curved_seam_round;
 mod flush_join_loft;
-mod geometry_provider;
+pub(crate) mod geometry_provider;
 mod gltf_import;
 mod import_component;
 mod large_step_import;

@@ -12,6 +12,46 @@ provider code: a provider is a separate program, and the two exchange STEP text.
 own code stays MIT OR Apache-2.0, a provider that crashes cannot take the app down, and the browser
 build is unchanged (it has no provider).
 
+## Installing a provider
+
+Name the provider program in `SOLIDCRAFT_GEOMETRY_PROVIDER` before starting the desktop app or
+`solidcraft-cli` (`run`, `eval`, `mcp` and every other command):
+
+```sh
+SOLIDCRAFT_GEOMETRY_PROVIDER=/path/to/solidcraft-occt-provider solidcraft-cli mcp
+```
+
+At start-up SolidCraft asks the program who it is. The CLI says on standard error which provider
+it uses (`geometry provider: occt 8.0.1 (/path/…)`), or why it uses none; the desktop app writes
+the same to its log. A program that can't be started or doesn't answer is not used, and every
+feature evaluates as it does without one. Unset, empty or `off` means no provider.
+
+`geometry.providers` (any command surface: palette, scripts, control channel, MCP `execute`)
+reports the installed provider: `{installed: true, provider, version, program, protocol,
+operations}`, or `{installed: false, message}` saying why there is none. The browser build never
+has one, and says so.
+
+## The provider program
+
+A provider is any program that speaks `solidcraft-geometry-provider/1`. SolidCraft starts it once
+per request, writes one JSON object on one line to its standard input, and reads one JSON object
+on one line from its standard output; then the program exits.
+
+| Request | Reply |
+|---|---|
+| `{"protocol": "solidcraft-geometry-provider/1", "op": "hello"}` | `{"ok": true, "provider": "occt", "version": "8.0.1", "operations": ["boolean"]}` |
+| `{"protocol": …, "op": "boolean", "kind": "union" \| "cut" \| "intersect", "operands": [STEP, STEP], "tolerance_mm": 1e-6}` | `{"ok": true, "step": STEP}` |
+| anything it cannot do | `{"ok": false, "error": "…"}` |
+
+- Operands and results are complete STEP files (AP214/AP242 text) in millimetres. The first
+  operand is the target and the second the tool. The result's solids are its pieces.
+- `provider` is a short name (letters, digits, `-`, `_`, `.`); `version` is the provider's own.
+  `operations` lists what it does; SolidCraft asks for nothing else.
+- The reply is the first line of standard output that starts with `{`. Standard error is the
+  program's log: the last lines go into SolidCraft's error when the program fails.
+- A program that exits without a reply, writes more than 512 MiB, or takes longer than 10 s to
+  say hello or 120 s for an operation is stopped and its request fails.
+
 ## What is asked today
 
 Booleans of timeline features: the join, cut or intersection a feature makes with its target
@@ -20,7 +60,7 @@ bodies (an extrude, revolve, loft, sweep, primitive, hole, pattern or combine, a
 
 A Boolean is handed over only when all of these hold:
 
-- a provider is installed (`solidcraft_kernel::provider::install`, done once by the application);
+- a provider is installed (above);
 - the kernel failed with a geometry error (`KernelError::Failed` or `Internal`). Bad input
   (`Invalid`, a mesh body, a size too large) is not a geometry failure and is reported as before;
 - both operands are B-rep solids.
@@ -86,11 +126,7 @@ gone: it is evaluated again, and the feature fails as it does without one.
 
 ## Not done yet
 
-- The program boundary: the request and reply (`ProviderRequest`, `ProviderReply`) are defined and
-  serialisable, but no application installs a provider yet. Next: a provider run as a separate
-  program over stdin and stdout (one JSON line each way), found through
-  `SOLIDCRAFT_GEOMETRY_PROVIDER`, with a time limit; a `geometry.providers` command that lists what
-  is installed (none in the browser, with a message saying so).
+- A preference for the provider program in the desktop app (today: the environment only).
 - A replay bundle for an operation that was handed over (its operands as STEP and the request,
   never the design), and a command to replay it locally.
 - The OCCT provider program itself, in its own repository.

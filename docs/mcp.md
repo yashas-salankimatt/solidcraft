@@ -44,6 +44,11 @@ that was running when it went away says the app did not answer and may have quit
 after running the call or not, so inspect the design before sending a change again.
 A `batch` that could not be sent says the app is not running, so it is safe to send again.
 
+A headless server hands the Booleans SolidCraft's kernel cannot do to a
+[geometry provider](geometry-providers.md) when one is installed:
+`SOLIDCRAFT_GEOMETRY_PROVIDER=/path/to/provider solidcraft-cli mcp`. Bridged, the app's own
+provider is used.
+
 stdout carries only protocol messages; errors go to stderr. Bridged screenshots are written to a
 temporary file by the app and read back by the server, so both must run on the same machine.
 

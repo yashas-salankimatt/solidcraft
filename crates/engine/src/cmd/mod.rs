@@ -38,6 +38,7 @@ pub use features::{auto_operation, extrude_reach};
 mod component_link;
 mod config;
 mod file;
+mod geometry;
 mod inspect;
 pub(crate) mod joints;
 mod libraries;
@@ -278,6 +279,7 @@ pub fn command_specs() -> Vec<&'static CommandSpec> {
     v.extend(view_navigation::COMMANDS.iter());
     v.extend(view_dxf::COMMANDS.iter());
     v.extend(diagnostics::COMMANDS.iter());
+    v.extend(geometry::COMMANDS.iter());
     v.extend(render::COMMANDS.iter());
     v
 }
