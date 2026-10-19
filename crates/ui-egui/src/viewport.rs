@@ -116,6 +116,13 @@ pub struct ViewportState {
     /// Inside a bracketed trackpad scroll (`Start` without its `End` yet):
     /// point moves pan, bare moves are a mouse.
     pub(crate) trackpad_gesture: bool,
+    /// The fingers on a touch screen ([`crate::touch`]).
+    pub(crate) touch: crate::touch::Tracker,
+    /// What a single finger's drag will do once it moves (it waits until it is clearly a drag,
+    /// and whether it rested first), and whether it has decided.
+    pub(crate) touch_nav: Option<(NavMode, bool)>,
+    /// Two or more fingers are moving the view (until all are up), and they began over it.
+    pub(crate) touch_multi: bool,
     /// A primary press on the axis gizmo: the pointer position used by its last orbit step.
     pub axis_drag: Option<Pos2>,
     /// Unsnapped camera while Shift-orbit previews a standard or diagonal view.
@@ -2346,6 +2353,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
         pan,
         primary_nav,
         mode,
+        touch_gesture,
     } = input;
     app.viewport.physical_scale = ui.ctx().pixels_per_point();
     // Suppress-snap chord and manipulator-free prefs; Shift midpoint targeting while sketching.
@@ -2404,8 +2412,11 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
     app.viewport.hover = cand.as_ref().map(|c| c.0.clone());
     // Select Other: a press held still opens the list of everything under it; while the list is
     // open its row under the pointer is what lights up.
+    // Fingers gesturing (two or more, until all are up) hold back clicks, drags and box selection
+    // as Select Other's hold does: the first finger of a two-finger tap selects nothing.
     let held =
-        crate::select_other::track_hold(app, ui.ctx(), &proj, inside, primary_pressed, primary_down, hover, primary_nav.is_some() || mode.is_some());
+        crate::select_other::track_hold(app, ui.ctx(), &proj, inside, primary_pressed, primary_down, hover, primary_nav.is_some() || mode.is_some())
+            || touch_gesture;
     crate::select_other::hover_override(app);
     let painter = ui.painter_at(rect);
     // Background gradient.

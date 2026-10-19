@@ -89,6 +89,8 @@ mod surface_errors_tests;
 #[cfg(test)]
 mod timeline_marks_tests;
 #[cfg(test)]
+mod touch_ui_tests;
+#[cfg(test)]
 mod status_tests {
     #[test]
     fn the_status_bar_names_commands_by_label() {
@@ -202,6 +204,7 @@ pub mod tool_modifiers;
 pub mod toolbar;
 pub mod toolbar_custom;
 pub mod tools;
+pub(crate) mod touch;
 pub mod update;
 pub mod viewport;
 mod viewport_layout;
@@ -415,6 +418,10 @@ pub struct SolveApp {
     pub synthetic: Vec<egui::Event>,
     /// The modifiers of the synthetic press in progress (a Ctrl-drag keeps Ctrl while it moves).
     pub synthetic_mods: egui::Modifiers,
+    /// Touch input fixed up before egui sees it ([`touch::RawTouch`]), and whether some of it
+    /// waits for the next frame.
+    touch_raw: touch::RawTouch,
+    touch_waiting: bool,
     control_rx: Option<Receiver<ControlRequest>>,
     /// Control requests that change the design, held while a file loads.
     control_held: std::collections::VecDeque<ControlRequest>,
@@ -517,6 +524,8 @@ impl SolveApp {
             frame_rate: frame_rate::FrameRate::default(),
             synthetic: Vec::new(),
             synthetic_mods: egui::Modifiers::default(),
+            touch_raw: Default::default(),
+            touch_waiting: false,
             control_rx: None,
             agent_chat: Default::default(),
             control_held: Default::default(),
@@ -1312,6 +1321,10 @@ impl SolveApp {
 
     /// Per-frame logic before layout.
     pub fn logic(&mut self, ctx: &egui::Context) {
+        if self.touch_waiting {
+            // A finger's press waits a frame (touch::RawTouch): make sure there is one.
+            ctx.request_repaint();
+        }
         file_picker::tick(self, ctx);
         render_workspace::sync_backend(self);
         render_workspace::tick(self, ctx);
@@ -1363,8 +1376,9 @@ impl SolveApp {
         }
     }
 
-    /// Inject synthetic events (one pointer event per frame).
+    /// Inject synthetic events (one pointer event per frame), and fix up touch input.
     pub fn raw_input_hook(&mut self, raw: &mut egui::RawInput) {
+        self.touch_waiting = self.touch_raw.normalize(&mut raw.events);
         if self.synthetic.is_empty() {
             return;
         }
