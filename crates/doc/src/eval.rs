@@ -1197,11 +1197,6 @@ impl Model {
 
     /// Re-evaluate the document, reusing results up to the first changed feature.
     pub fn evaluate(&mut self, doc: &Document) {
-        // Results providers made, as the design saved them, are offered to its operations.
-        kernel::provider::with_saved_results(crate::provider_results::offered(doc), || self.evaluate_offered(doc));
-    }
-
-    fn evaluate_offered(&mut self, doc: &Document) {
         let (vals, perr) = evaluation_values(doc);
         self.param_errors = perr;
         // A result evaluated with a geometry provider, or with results one saved, is never taken
@@ -1341,12 +1336,17 @@ impl Model {
             };
             // A parameter with an error fails the features using it, with that error.
             let bad_param = param_names(f).into_iter().find_map(|n| self.param_errors.get(&n).map(|e| format!("parameter `{n}`: {e}")));
+            // Results a provider made for this feature, as the design saved them, while the design
+            // up to it is as it was then.
+            let saved = crate::provider_results::offered_for(doc, i, f.id);
             let ((r, mut boolean_diagnostics), geometry_fallbacks) = kernel::provider::capture_fallbacks(|| {
-                kernel::capture_boolean_diagnostics(|| match bad_param {
-                    Some(e) => Err(kernel::KernelError::Failed(e)),
-                    None => kernel::guard(&f.name, || {
-                        eval_feature(doc, &vals, f, &mut next, &mut warning).map_err(|e| kernel::KernelError::Failed(e.to_string()))
-                    }),
+                kernel::provider::with_saved_results(saved, || {
+                    kernel::capture_boolean_diagnostics(|| match bad_param {
+                        Some(e) => Err(kernel::KernelError::Failed(e)),
+                        None => kernel::guard(&f.name, || {
+                            eval_feature(doc, &vals, f, &mut next, &mut warning).map_err(|e| kernel::KernelError::Failed(e.to_string()))
+                        }),
+                    })
                 })
             });
             if r.is_ok() {

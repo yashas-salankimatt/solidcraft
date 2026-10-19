@@ -4,16 +4,23 @@
 //! to be rebuilt.
 //!
 //! A saved result is a cache, not the design: the feature keeps its parameters and inputs, and its
-//! result is rebuilt whenever it can be. A saved one is used only for exactly the operands it was
-//! made from, and only after the checks a provider's answer gets (`solidcraft_kernel::provider`).
-//! Nothing native to a provider is saved: the result is STEP text.
+//! result is rebuilt whenever it can be. A saved one is offered back only to the feature that made
+//! it, and only while the design up to that feature is exactly as it was saved ([`intent`]): an
+//! edit to it or to anything before it means the result must be made again. Which saved result is
+//! which of the feature's operations is told by their operands ([`OperandPrint`]), and each is
+//! used only after the checks a provider's answer gets (`solidcraft_kernel::provider`). Nothing
+//! native to a provider is saved: the result is STEP text.
+//!
+//! The design is compared, not the operands' geometry: the same design evaluates to operands that
+//! differ in their last digits on another computer (the browser's floating point is not the
+//! desktop's), and a saved result must open there all the same.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use solidcraft_kernel as kernel;
-use solidcraft_kernel::provider::{SavedResult, SavedResults};
+use solidcraft_kernel::provider::{OperandPrint, SavedResult, SavedResults};
 
 use crate::{Document, Model};
 
@@ -33,9 +40,10 @@ pub struct ProviderResult {
     pub version: String,
     /// The operation (`boolean cut`).
     pub operation: String,
-    /// The operation's request digest (`kernel::provider::request_digest`): the operands it was
-    /// made from.
-    pub request: String,
+    /// The design up to and including the feature when the result was made ([`intent`]).
+    pub intent: String,
+    /// What the operation's two operands were like.
+    pub operands: [OperandPrint; 2],
     /// The result, as STEP text (a deduplicated blob in a container).
     pub step: Arc<str>,
 }
@@ -45,30 +53,63 @@ fn plain(s: &str) -> bool {
     !s.is_empty() && s.len() <= 64 && !s.chars().any(char::is_control)
 }
 
-/// The saved results to offer an evaluation of `doc`, by request digest; `None` when it has none.
-/// Entries that are too large, too many or malformed are left out (the design file is hostile).
-pub fn offered(doc: &Document) -> Option<Arc<SavedResults>> {
+/// The design up to and including feature `index` of `doc`, as a stable digest (64-bit FNV-1a of
+/// its saved JSON, in hex): units, parameters, components and the features through it. The same on
+/// every computer and in every build that saves the design alike.
+pub fn intent(doc: &Document, index: usize) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |text: String| {
+        for b in text.as_bytes().iter().chain(&(text.len() as u64).to_le_bytes()) {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    };
+    eat(doc.units.clone());
+    eat(json(&doc.params));
+    eat(json(&doc.components));
+    eat(json(&doc.body_components));
+    eat(json(&doc.sheet));
+    eat(json(&doc.plastic));
+    eat(json(&doc.configs));
+    eat(json(&doc.features.get(..=index).unwrap_or_default()));
+    format!("{h:016x}")
+}
+
+/// `v` as the design saves it.
+fn json<T: Serialize + ?Sized>(v: &T) -> String {
+    serde_json::to_string(v).unwrap_or_default()
+}
+
+/// The saved results to offer feature `index` of `doc` (whose id is `id`): those made for it while
+/// the design up to it was as it is now. `None` when there are none.
+pub fn offered_for(doc: &Document, index: usize, id: u64) -> Option<Arc<SavedResults>> {
+    if !doc.provider_results.iter().any(|r| r.feature == id) {
+        return None;
+    }
+    let now = intent(doc, index);
     let mut bytes = 0usize;
     let mut out = SavedResults::new();
-    for r in doc.provider_results.iter().take(MAX_RESULTS) {
-        if !(plain(&r.provider) && plain(&r.version) && r.request.len() == 16 && !r.step.is_empty()) {
+    for r in doc.provider_results.iter().take(MAX_RESULTS).filter(|r| r.feature == id && r.intent == now) {
+        if !(plain(&r.provider) && plain(&r.version) && plain(&r.operation) && !r.step.is_empty()) {
             continue;
         }
         bytes = bytes.saturating_add(r.step.len());
         if bytes > MAX_BYTES {
             break;
         }
-        out.entry(r.request.clone()).or_insert_with(|| SavedResult {
+        out.push(SavedResult {
             provider: r.provider.clone(),
             version: r.version.clone(),
+            operation: r.operation.clone(),
+            operands: r.operands,
             step: r.step.clone(),
         });
     }
     (!out.is_empty()).then(|| Arc::new(out))
 }
 
-/// A digest of what [`offered`] offers for `doc`: 0, and so every evaluation key as before, when
-/// it offers nothing.
+/// A digest of the results `doc` saved: 0, and so every evaluation key as before, when it saved
+/// none.
 pub fn digest(doc: &Document) -> u64 {
     use std::hash::{Hash, Hasher};
     if doc.provider_results.is_empty() {
@@ -76,7 +117,7 @@ pub fn digest(doc: &Document) -> u64 {
     }
     let mut h = std::collections::hash_map::DefaultHasher::new();
     for r in doc.provider_results.iter().take(MAX_RESULTS) {
-        (&r.request, &r.provider, &r.version, r.step.len()).hash(&mut h);
+        (r.feature, &r.intent, &r.provider, &r.version, r.step.len()).hash(&mut h);
     }
     h.finish() | 1
 }
@@ -86,28 +127,30 @@ pub fn digest(doc: &Document) -> u64 {
 /// rolled back) so they are not lost.
 pub fn to_save(doc: &Document, model: &Model) -> Vec<ProviderResult> {
     let mut out: Vec<ProviderResult> = Vec::new();
-    let mut seen: BTreeSet<(u64, String)> = BTreeSet::new();
+    let index: std::collections::BTreeMap<u64, usize> = doc.features.iter().enumerate().map(|(i, f)| (f.id, i)).collect();
     let evaluated: BTreeSet<u64> = model.results.iter().filter(|r| !r.skipped).map(|r| r.id).collect();
     for r in model.results.iter().filter(|r| !r.skipped) {
-        for e in r.geometry_fallbacks.iter().filter(|e| e.kept()) {
-            if let Some(step) = &e.result_step
-                && !e.request.is_empty()
-                && seen.insert((r.id, e.request.clone()))
-            {
-                out.push(ProviderResult {
-                    feature: r.id,
-                    provider: e.provider.clone(),
-                    version: e.provider_version.clone(),
-                    operation: e.operation.clone(),
-                    request: e.request.clone(),
-                    step: step.clone(),
-                });
-            }
+        let Some(&i) = index.get(&r.id) else { continue };
+        let kept: Vec<_> = r.geometry_fallbacks.iter().filter(|e| e.kept()).filter_map(|e| Some((e, e.result_step.clone()?, e.operands?))).collect();
+        if kept.is_empty() {
+            continue;
+        }
+        let intent = intent(doc, i);
+        for (e, step, operands) in kept {
+            out.push(ProviderResult {
+                feature: r.id,
+                provider: e.provider.clone(),
+                version: e.provider_version.clone(),
+                operation: e.operation.clone(),
+                intent: intent.clone(),
+                operands,
+                step,
+            });
         }
     }
-    let live: BTreeSet<u64> = doc.features.iter().map(|f| f.id).collect();
+    // Results saved for features not evaluated now (suppressed, rolled back) are kept, not lost.
     for r in &doc.provider_results {
-        if live.contains(&r.feature) && !evaluated.contains(&r.feature) && seen.insert((r.feature, r.request.clone())) {
+        if index.contains_key(&r.feature) && !evaluated.contains(&r.feature) {
             out.push(r.clone());
         }
     }

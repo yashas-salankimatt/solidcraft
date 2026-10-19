@@ -130,16 +130,21 @@ A design saves the results a provider made for its features, so a computer witho
 (the browser, a machine without OCCT) still shows, measures and exports them:
 
 - Saving (`file.save`, Save As, recovery autosaves) writes `provider_results`: the feature, the
-  provider and its version, the operation, the request's digest (the operands it was made from)
+  provider and its version, the operation, a digest of the design up to and including the feature
+  (`intent`), what the operation's two operands were like (volume, area, centre of mass and box)
   and the result as STEP text, a deduplicated blob in a container. Nothing native to a provider
   is saved. A design no provider helped saves exactly as before.
-- Opening offers them back to the evaluation. When SolidCraft's kernel fails an operation and no
-  provider here gives a result, the saved result for exactly these operands is used, after the
-  same checks a provider's answer gets. A saved result for other operands, or one that fails the
-  checks, is never used.
+- Opening offers each feature the results saved for it, but only while the design up to that
+  feature is exactly as it was saved: an edit to the feature or to anything before it (a
+  parameter, a sketch, an earlier feature) means its result must be made again. The design is
+  compared rather than the operands, because the same design evaluates to operands that differ in
+  their last digits on another computer (the browser's floating point is not the desktop's).
+- When SolidCraft's kernel fails an operation and no provider here gives a result, the saved
+  result for an operation of that kind whose operands it fits is used, after the same checks a
+  provider's answer gets. One that fails the checks is never used.
 - The feature then says so: `outcome: "saved"` in `geometry_fallbacks`, and a warning that it is
   the result the provider made and the design saved, and that rebuilding it once its inputs change
-  needs that provider. When its inputs have changed, the feature fails and its error names the
+  needs that provider. Once its inputs have changed, the feature fails and its error names the
   provider it needs and says it is not installed here.
 - The feature stays parametric: its parameters and inputs are edited as always, and the saved
   result is only a cache of what the provider made for them.

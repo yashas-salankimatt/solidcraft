@@ -13,13 +13,13 @@
 //! recorded ([`FallbackEvent`]), so a result a provider made is never passed off as the
 //! kernel's. Its faces carry no history: they are named from geometry (unverified).
 //!
-//! A kept result can be saved with the design and offered back while it evaluates
-//! ([`with_saved_results`]). It is used, after the same checks, only when the operation comes back
-//! with exactly the operands it was made from and no provider gives a result now: so a computer
-//! without the provider (the browser) still shows, measures and exports what one made.
+//! A kept result can be saved with the design and offered back to the feature that made it, while
+//! the design up to it is as it was ([`with_saved_results`]). When no provider gives a result now it
+//! is used, after the same checks, for the operation of that kind whose operands it fits
+//! ([`OperandPrint`]): so a computer without the provider (the browser) still shows, measures and
+//! exports what one made.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
@@ -178,12 +178,12 @@ pub struct FallbackEvent {
     pub provider_ms: f64,
     /// Time checking the provider's result.
     pub check_ms: f64,
-    /// The request's digest ([`request_digest`]): what a kept result is saved under.
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub request: String,
-    /// A kept result, as STEP text, for the design to save; not reported.
+    /// A kept result, as STEP text, and what its operands were like, for the design to save; not
+    /// reported.
     #[serde(skip)]
     pub result_step: Option<Arc<str>>,
+    #[serde(skip)]
+    pub operands: Option<[OperandPrint; 2]>,
 }
 
 /// The kernel's first reason in an error (`boolean Union: no result`): the whole of it, every
@@ -288,17 +288,61 @@ fn record(event: FallbackEvent) {
     });
 }
 
+/// What a Boolean's operand was like, to tell which saved result belongs to which operation of a
+/// feature: its volume, area, centre of mass and box. Close is enough: the same design measures
+/// a little differently on another computer (the browser's floating point is not the desktop's),
+/// whether the design is unchanged is settled by the feature's design (`provider_results`), and a
+/// saved result is checked against the actual operands before it is used.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OperandPrint {
+    pub volume: f64,
+    pub area: f64,
+    pub centroid: [f64; 3],
+    pub min: [f64; 3],
+    pub max: [f64; 3],
+}
+
+impl OperandPrint {
+    /// The print of `body`, when it can be measured.
+    pub fn of(body: &Body) -> Option<Self> {
+        let m = crate::measure(body).ok()?;
+        let v = |p: Vec3| [p.x, p.y, p.z];
+        let print = OperandPrint { volume: m.volume, area: m.area, centroid: v(m.centroid), min: v(m.bbox.min), max: v(m.bbox.max) };
+        print.finite().then_some(print)
+    }
+
+    fn finite(&self) -> bool {
+        [self.volume, self.area].iter().chain(&self.centroid).chain(&self.min).chain(&self.max).all(|x| x.is_finite())
+    }
+
+    /// Whether `self` and `other` are the same operand to within a thousandth of its size.
+    fn fits(&self, other: &OperandPrint) -> bool {
+        let size = (0..3).map(|k| (self.max[k] - self.min[k]).abs()).fold(0.0, f64::max).max(1e-9);
+        let near = |a: f64, b: f64, scale: f64| (a - b).abs() <= 1e-3 * scale.abs().max(1e-12);
+        other.finite()
+            && near(self.volume, other.volume, self.volume)
+            && near(self.area, other.area, self.area)
+            && (0..3).all(|k| {
+                near(self.centroid[k], other.centroid[k], size) && near(self.min[k], other.min[k], size) && near(self.max[k], other.max[k], size)
+            })
+    }
+}
+
 /// A result a provider made, as a design saved it: offered back by [`with_saved_results`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct SavedResult {
     pub provider: String,
     pub version: String,
+    /// The operation (`boolean cut`).
+    pub operation: String,
+    /// What its operands were like.
+    pub operands: [OperandPrint; 2],
     /// The result as STEP text.
     pub step: Arc<str>,
 }
 
-/// Saved results by request digest.
-pub type SavedResults = HashMap<String, SavedResult>;
+/// The saved results offered to a feature.
+pub type SavedResults = Vec<SavedResult>;
 
 thread_local! {
     static SAVED: RefCell<Option<Arc<SavedResults>>> = const { RefCell::new(None) };
@@ -321,24 +365,6 @@ pub fn with_saved_results<R>(saved: Option<Arc<SavedResults>>, f: impl FnOnce() 
 
 fn saved_results() -> Option<Arc<SavedResults>> {
     SAVED.with(|s| s.borrow().clone())
-}
-
-/// The digest a request's result is saved under: its operation and each operand's STEP text, with
-/// their lengths, through 64-bit FNV-1a, in hex. Stable across runs and computers; not secure,
-/// and need not be: a saved result is checked against the operands every time it is used.
-pub fn request_digest(request: &ProviderRequest) -> String {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut eat = |bytes: &[u8]| {
-        for b in bytes.iter().chain(&(bytes.len() as u64).to_le_bytes()) {
-            h ^= u64::from(*b);
-            h = h.wrapping_mul(0x0100_0000_01b3);
-        }
-    };
-    eat(request.operation.label().as_bytes());
-    for operand in &request.operands {
-        eat(operand.as_bytes());
-    }
-    format!("{h:016x}")
 }
 
 /// [`crate::boolean`], handed to the current provider when SolidCraft's kernel fails with a
@@ -387,20 +413,16 @@ fn fall_back(
         kernel_ms,
         provider_ms: 0.0,
         check_ms: 0.0,
-        request: String::new(),
         result_step: None,
+        operands: None,
     };
-    let asked = web_time::Instant::now();
-    let request = request(a, b, operation, provider.is_some_and(|p| p.wants_native_operands()));
     let mut notes = Vec::new();
     if let Some(provider) = provider {
         let mut e = event(provider.id(), provider.version());
-        let reply = request
-            .as_ref()
-            .map_err(Clone::clone)
-            .and_then(|request| crate::guard("geometry provider", || provider.run(request).map_err(KernelError::Failed)));
+        let asked = web_time::Instant::now();
+        let reply = request(a, b, operation, provider.wants_native_operands())
+            .and_then(|request| crate::guard("geometry provider", || provider.run(&request).map_err(KernelError::Failed)));
         e.provider_ms = ms(asked);
-        e.request = request.as_ref().map(request_digest).unwrap_or_default();
         match reply {
             Err(why) => e.reason = Some(why.to_string().trim_start_matches("the operation failed: ").to_string()),
             Ok(reply) => {
@@ -411,6 +433,7 @@ fn fall_back(
                     Ok(body) => {
                         e.outcome = FallbackOutcome::Accepted;
                         e.result_step = Some(reply.step.into());
+                        e.operands = OperandPrint::of(a).zip(OperandPrint::of(b)).map(|(pa, pb)| [pa, pb]);
                         record(e);
                         return Ok(Some(body));
                     }
@@ -424,27 +447,28 @@ fn fall_back(
         notes.push(e.description());
         record(e);
     }
-    if let (Some(saved), Ok(request)) = (saved, &request) {
-        let digest = request_digest(request);
-        if let Some(kept) = saved.get(&digest) {
-            let mut e = event(&kept.provider, &kept.version);
-            e.request = digest;
-            let checking = web_time::Instant::now();
-            let checked = checked(a, b, op, &kept.step);
-            e.check_ms = ms(checking);
-            match checked {
-                Ok(body) => {
-                    e.outcome = FallbackOutcome::Saved;
-                    e.result_step = Some(kept.step.clone());
-                    record(e);
-                    return Ok(Some(body));
-                }
-                Err(why) => {
-                    e.outcome = FallbackOutcome::Refused;
-                    e.reason = Some(format!("the result the design saved no longer passes the checks: {why}"));
-                    notes.push(e.description());
-                    record(e);
-                }
+    let label = operation.label();
+    let prints = saved.filter(|saved| saved.iter().any(|k| k.operation == label)).and_then(|_| OperandPrint::of(a).zip(OperandPrint::of(b)));
+    if let (Some(saved), Some((pa, pb))) = (saved, prints)
+        && let Some(kept) = saved.iter().find(|k| k.operation == label && k.operands[0].fits(&pa) && k.operands[1].fits(&pb))
+    {
+        let mut e = event(&kept.provider, &kept.version);
+        let checking = web_time::Instant::now();
+        let checked = checked(a, b, op, &kept.step);
+        e.check_ms = ms(checking);
+        match checked {
+            Ok(body) => {
+                e.outcome = FallbackOutcome::Saved;
+                e.result_step = Some(kept.step.clone());
+                e.operands = Some([pa, pb]);
+                record(e);
+                return Ok(Some(body));
+            }
+            Err(why) => {
+                e.outcome = FallbackOutcome::Refused;
+                e.reason = Some(format!("the result the design saved no longer passes the checks: {why}"));
+                notes.push(e.description());
+                record(e);
             }
         }
     }
@@ -885,9 +909,9 @@ mod tests {
     }
 
     fn saved(a: &Body, b: &Body, op: BoolOp, result: &Body) -> SavedResults {
-        let digest = request_digest(&request(a, b, ProviderOperation::Boolean { kind: op }, false).unwrap());
-        let kept = SavedResult { provider: "fixed".into(), version: "0.9".into(), step: step(result).into() };
-        HashMap::from([(digest, kept)])
+        let operands = [OperandPrint::of(a).unwrap(), OperandPrint::of(b).unwrap()];
+        let operation = ProviderOperation::Boolean { kind: op }.label();
+        vec![SavedResult { provider: "fixed".into(), version: "0.9".into(), operation, operands, step: step(result).into() }]
     }
 
     #[test]
@@ -900,7 +924,7 @@ mod tests {
         assert!(r.unwrap().unwrap().history().is_none());
         let e = &events[0];
         assert_eq!((e.outcome, e.provider.as_str(), e.provider_version.as_str()), (FallbackOutcome::Saved, "fixed", "0.9"));
-        assert!(e.kept() && e.result_step.is_some() && store.contains_key(&e.request));
+        assert!(e.kept() && e.result_step.is_some() && e.operands == Some(store[0].operands));
         assert!(warning(&events).is_some_and(|w| w.contains("as saved") && w.contains("needs the fixed geometry provider")), "{events:?}");
         // A provider that fails first, then the saved result.
         let failing = Fixed::new(Err("down".into()));
@@ -935,23 +959,22 @@ mod tests {
         assert!(saved_results().is_none(), "the offer ends with its scope");
     }
 
-    /// Saved designs key their results by this digest: it must not change between builds.
+    /// The same operand measured on another computer differs in its last digits; another operand
+    /// (moved, resized) does not fit.
     #[test]
-    fn the_request_digest_is_stable() {
-        let request = |kind, b: &str| ProviderRequest {
-            operation: ProviderOperation::Boolean { kind },
-            operands: vec!["A".into(), b.into()],
-            tolerance_mm: 1e-6,
-            native: vec![vec![1, 2, 3]],
-        };
-        let d = request_digest(&request(BoolOp::Cut, "B"));
-        assert_eq!(d, "574a3d5fc85ad901");
-        assert_ne!(request_digest(&request(BoolOp::Union, "B")), d);
-        assert_ne!(request_digest(&request(BoolOp::Cut, "B ")), d);
-        let mut other = request(BoolOp::Cut, "B");
-        other.tolerance_mm = 1.0;
-        other.native.clear();
-        assert_eq!(request_digest(&other), d, "only the operation and the operands count");
+    fn operand_prints_fit_the_same_operand_only() {
+        let (a, b) = operands();
+        let (pa, pb) = (OperandPrint::of(&a).unwrap(), OperandPrint::of(&b).unwrap());
+        let mut noisy = pa;
+        noisy.volume *= 1.0 + 1e-12;
+        noisy.centroid[0] += 1e-9;
+        assert!(pa.fits(&noisy) && !pa.fits(&pb));
+        let moved = OperandPrint::of(&crate::transform(&a, Vec3::new(0.5, 0., 0.), Vec3::ZERO, Vec3::Z, 0.0).unwrap()).unwrap();
+        let grown = OperandPrint::of(&cube(Vec3::ZERO, Vec3::new(20., 10., 10.5))).unwrap();
+        assert!(!pa.fits(&moved) && !pa.fits(&grown));
+        let mut broken = pa;
+        broken.area = f64::NAN;
+        assert!(!pa.fits(&broken));
     }
 
     #[test]

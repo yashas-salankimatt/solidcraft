@@ -266,10 +266,14 @@ fn a_provider_result_travels_with_the_design_to_a_computer_without_the_provider(
         (solidcraft_io::write_design(&saved), container, id, made)
     });
     with_provider(None, || {
-        for (kind, doc) in
+        for (kind, mut doc) in
             [("json", solidcraft_io::read_design(&json_bytes).unwrap()), ("container", solidcraft_io::read_design(&container).unwrap())]
         {
             assert_eq!(doc.provider_results.len(), 1, "{kind}");
+            // Another computer measures the same operands a little differently (the browser's
+            // floating point is not the desktop's): the saved result is used there all the same.
+            doc.provider_results[0].operands[0].volume *= 1.0 + 1e-9;
+            doc.provider_results[0].operands[1].centroid[0] += 1e-9;
             let mut s = Session::new(doc);
             let r = s.model.result(id).unwrap();
             assert!(r.error.is_none(), "{kind}: {r:?}");
