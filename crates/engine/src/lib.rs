@@ -461,13 +461,17 @@ impl Session {
         Ok(())
     }
 
-    /// The design as a file holds it: the document with what is hidden in it.
+    /// The design as a file holds it: the document with what is hidden in it and the results
+    /// geometry providers made for it.
     pub fn design(&self) -> std::borrow::Cow<'_, Document> {
-        if self.visibility.is_empty() {
+        // The results geometry providers made, as this evaluation keeps them (docs/geometry-providers.md).
+        let provider_results = solidcraft_doc::provider_results::to_save(&self.doc, &self.model);
+        if self.visibility.is_empty() && provider_results == self.doc.provider_results {
             return std::borrow::Cow::Borrowed(&*self.doc);
         }
         let mut doc = (*self.doc).clone();
         doc.visibility = self.visibility.clone();
+        doc.provider_results = provider_results;
         std::borrow::Cow::Owned(doc)
     }
     /// The design has changes not in its file (a recovered design).

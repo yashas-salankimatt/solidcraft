@@ -1199,9 +1199,9 @@ impl Model {
     pub fn evaluate(&mut self, doc: &Document) {
         let (vals, perr) = evaluation_values(doc);
         self.param_errors = perr;
-        // A result evaluated with a geometry provider is never taken for one without it (0, and
-        // so every fingerprint as before, when there is none).
-        let provider = kernel::provider::digest();
+        // A result evaluated with a geometry provider, or with results one saved, is never taken
+        // for one without (0, and so every fingerprint as before, when there is neither).
+        let provider = kernel::provider::digest() ^ crate::provider_results::digest(doc);
         let mut prev_fp = provider;
         let mut state = self.empty.clone();
         let mut out: Vec<FeatureResult> = Vec::with_capacity(doc.features.len());
@@ -1336,12 +1336,17 @@ impl Model {
             };
             // A parameter with an error fails the features using it, with that error.
             let bad_param = param_names(f).into_iter().find_map(|n| self.param_errors.get(&n).map(|e| format!("parameter `{n}`: {e}")));
+            // Results a provider made for this feature, as the design saved them, while the design
+            // up to it is as it was then.
+            let saved = crate::provider_results::offered_for(doc, i, f.id);
             let ((r, mut boolean_diagnostics), geometry_fallbacks) = kernel::provider::capture_fallbacks(|| {
-                kernel::capture_boolean_diagnostics(|| match bad_param {
-                    Some(e) => Err(kernel::KernelError::Failed(e)),
-                    None => kernel::guard(&f.name, || {
-                        eval_feature(doc, &vals, f, &mut next, &mut warning).map_err(|e| kernel::KernelError::Failed(e.to_string()))
-                    }),
+                kernel::provider::with_saved_results(saved, || {
+                    kernel::capture_boolean_diagnostics(|| match bad_param {
+                        Some(e) => Err(kernel::KernelError::Failed(e)),
+                        None => kernel::guard(&f.name, || {
+                            eval_feature(doc, &vals, f, &mut next, &mut warning).map_err(|e| kernel::KernelError::Failed(e.to_string()))
+                        }),
+                    })
                 })
             });
             if r.is_ok() {
@@ -1380,7 +1385,13 @@ impl Model {
                     watched.offer(i + 1, doc, &state);
                     None
                 }
-                Err(e) => Some(e.to_string().trim_start_matches("the operation failed: ").to_string()),
+                Err(e) => {
+                    let error = e.to_string().trim_start_matches("the operation failed: ").to_string();
+                    Some(match crate::provider_results::missing_provider_note(doc, f.id) {
+                        Some(note) => format!("{error}; {note}"),
+                        None => error,
+                    })
+                }
             };
             if !self.no_cache
                 && let Ok(mut m) = self.cache.lock()

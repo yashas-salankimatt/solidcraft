@@ -2405,6 +2405,11 @@ pub struct Document {
     /// a document in a session leaves this empty; the session puts it back when it saves.
     #[serde(default, skip_serializing_if = "Visibility::is_empty")]
     pub visibility: Visibility,
+    /// Results geometry providers made for features, saved so a computer without the provider
+    /// still shows them ([`crate::provider_results`]). Not an undo step: a session works them out
+    /// from its evaluation each time it saves.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provider_results: Vec<crate::provider_results::ProviderResult>,
 }
 
 /// Items hidden or shown one by one. Saved with the design, but not an undo step.
@@ -2578,6 +2583,7 @@ impl Document {
             browser_order: Default::default(),
             named_views: Vec::new(),
             visibility: Visibility::default(),
+            provider_results: Vec::new(),
         }
     }
 
