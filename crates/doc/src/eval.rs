@@ -637,6 +637,7 @@ struct CachedEval {
     error: Option<String>,
     warning: Option<String>,
     boolean_diagnostics: kernel::BooleanDiagnostics,
+    geometry_fallbacks: Vec<kernel::provider::FallbackEvent>,
     ms: f64,
     state: Arc<ModelState>,
     /// What the state costs, worked out once when it was stored (see
@@ -726,6 +727,10 @@ pub struct FeatureResult {
     pub error: Option<String>,
     pub warning: Option<String>,
     pub boolean_diagnostics: kernel::BooleanDiagnostics,
+    /// Operations handed to a geometry provider because the kernel could not do them
+    /// ([`kernel::provider`]), kept or not.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub geometry_fallbacks: Vec<kernel::provider::FallbackEvent>,
     pub ms: f64,
     pub skipped: bool,
     /// Not evaluated on the document's current inputs: a feature at or after a sketch shown live
@@ -1194,14 +1199,17 @@ impl Model {
     pub fn evaluate(&mut self, doc: &Document) {
         let (vals, perr) = evaluation_values(doc);
         self.param_errors = perr;
-        let mut prev_fp = 0u64;
+        // A result evaluated with a geometry provider is never taken for one without it (0, and
+        // so every fingerprint as before, when there is none).
+        let provider = kernel::provider::digest();
+        let mut prev_fp = provider;
         let mut state = self.empty.clone();
         let mut out: Vec<FeatureResult> = Vec::with_capacity(doc.features.len());
         let mut reuse = !self.no_cache;
         let mut recomputed = 0;
         let mut restored = 0;
         let marker = doc.marker.unwrap_or(usize::MAX);
-        let ctx = context_digest(doc, &vals);
+        let ctx = context_digest(doc, &vals) ^ provider;
         self.step_digests = StepDigests::of(doc, &self.step_digests);
         // Each feature's component, for `Document::legacy_body_component` on every body after
         // every feature without searching the timeline for each (the first feature with an id).
@@ -1236,6 +1244,7 @@ impl Model {
                     error: None,
                     warning: None,
                     boolean_diagnostics: Default::default(),
+                    geometry_fallbacks: Vec::new(),
                     ms: 0.0,
                     skipped: true,
                     stale: false,
@@ -1259,6 +1268,7 @@ impl Model {
                     error: c.error,
                     warning: c.warning,
                     boolean_diagnostics: c.boolean_diagnostics,
+                    geometry_fallbacks: c.geometry_fallbacks,
                     ms: c.ms,
                     skipped: false,
                     stale: false,
@@ -1326,14 +1336,20 @@ impl Model {
             };
             // A parameter with an error fails the features using it, with that error.
             let bad_param = param_names(f).into_iter().find_map(|n| self.param_errors.get(&n).map(|e| format!("parameter `{n}`: {e}")));
-            let (r, mut boolean_diagnostics) = kernel::capture_boolean_diagnostics(|| match bad_param {
-                Some(e) => Err(kernel::KernelError::Failed(e)),
-                None => kernel::guard(&f.name, || {
-                    eval_feature(doc, &vals, f, &mut next, &mut warning).map_err(|e| kernel::KernelError::Failed(e.to_string()))
-                }),
+            let ((r, mut boolean_diagnostics), geometry_fallbacks) = kernel::provider::capture_fallbacks(|| {
+                kernel::capture_boolean_diagnostics(|| match bad_param {
+                    Some(e) => Err(kernel::KernelError::Failed(e)),
+                    None => kernel::guard(&f.name, || {
+                        eval_feature(doc, &vals, f, &mut next, &mut warning).map_err(|e| kernel::KernelError::Failed(e.to_string()))
+                    }),
+                })
             });
             if r.is_ok() {
                 if let Some(note) = boolean_diagnostics.warning() {
+                    append_warning(&mut warning, note);
+                }
+                // A failed feature's error already says what the provider did.
+                if let Some(note) = kernel::provider::warning(&geometry_fallbacks) {
                     append_warning(&mut warning, note);
                 }
             } else {
@@ -1375,6 +1391,7 @@ impl Model {
                         error: error.clone(),
                         warning: warning.clone(),
                         boolean_diagnostics: boolean_diagnostics.clone(),
+                        geometry_fallbacks: geometry_fallbacks.clone(),
                         ms,
                         bytes: state.retained_bytes(),
                         state: state.clone(),
@@ -1387,6 +1404,7 @@ impl Model {
                 error,
                 warning,
                 boolean_diagnostics,
+                geometry_fallbacks,
                 ms,
                 skipped: false,
                 stale: false,
@@ -1733,7 +1751,8 @@ fn apply_traced(state: &mut ModelState, f: &Feature, tools: Vec<Traced>, op: Ope
             // Each union keeps the lineage of what it joins, so the joined body's faces keep
             // their names (the tool's new faces are named by their roles).
             let union = |a: &Traced, b: &Traced| -> Result<Traced> {
-                let u = kernel::boolean(&a.body, &b.body, BoolOp::Union)?.ok_or_else(|| DocError::Invalid("join produced nothing".into()))?;
+                let u = kernel::provider::boolean_with_fallback(&a.body, &b.body, BoolOp::Union)?
+                    .ok_or_else(|| DocError::Invalid("join produced nothing".into()))?;
                 Ok(Traced::step(u, &[a, b]))
             };
             for tool in &tools {
@@ -1778,7 +1797,7 @@ fn apply_traced(state: &mut ModelState, f: &Feature, tools: Vec<Traced>, op: Ope
                 let Some(mut acc) = state.bodies.get(ti).map(|b| Some(b.traced())) else { continue };
                 for t in &tools {
                     acc = match acc {
-                        Some(a) => kernel::boolean(&a.body, &t.body, bop)?.map(|r| Traced::step(r, &[&a, t])),
+                        Some(a) => kernel::provider::boolean_with_fallback(&a.body, &t.body, bop)?.map(|r| Traced::step(r, &[&a, t])),
                         None => None,
                     };
                 }
