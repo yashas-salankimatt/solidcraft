@@ -37,9 +37,11 @@ const OPERATION_LIMIT: Duration = Duration::from_secs(120);
 const HELLO_LIMIT: Duration = Duration::from_secs(10);
 
 /// Most bytes read from the program's standard output (a reply carries a whole STEP file).
+#[cfg(not(target_arch = "wasm32"))]
 const MAX_REPLY_BYTES: usize = 512 << 20;
 
 /// Most bytes of the program's standard error kept for an error message.
+#[cfg(not(target_arch = "wasm32"))]
 const MAX_LOG_BYTES: usize = 16 << 10;
 
 /// A provider program: who it said it is, and what it can do.
