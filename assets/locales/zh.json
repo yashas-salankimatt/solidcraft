@@ -1525,6 +1525,8 @@
   "ui.top": "上视",
   "ui.torus": "圆环体",
   "ui.total_angle": "总角度",
+  "ui.touch_twist_roll": "双指旋转以滚转视图",
+  "ui.touch_twist_roll_tip": "在触摸屏上，两根手指相互绕转时视图随之滚转（关闭时：双指仅平移和缩放）",
   "ui.trackpad_pan_tip": "触控板手势用于平移（关闭：像滚轮一样缩放）；鼠标滚轮缩放、拇指滚轮横向平移、双指捏合始终缩放",
   "ui.trim": "修剪",
   "ui.twist": "扭转",

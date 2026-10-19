@@ -1525,6 +1525,8 @@
   "ui.top": "Top",
   "ui.torus": "Torus",
   "ui.total_angle": "Total angle",
+  "ui.touch_twist_roll": "Twist two fingers to roll",
+  "ui.touch_twist_roll_tip": "On a touch screen, turning two fingers around each other rolls the view (off: two fingers only pan and zoom)",
   "ui.trackpad_pan_tip": "Trackpad gestures pan (off: they zoom like the wheel); mouse wheel zooms, thumb wheel pans sideways, pinch always zooms",
   "ui.trim": "Trim",
   "ui.twist": "Twist",

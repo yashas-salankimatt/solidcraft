@@ -193,11 +193,18 @@ impl Harness {
 
     /// Lay out and draw one frame (feeding queued pointer and key events).
     pub fn frame(&mut self) {
+        self.input(Vec::new());
+    }
+
+    /// One frame with these platform `events` (a touch screen's, say), through the input fixes
+    /// the app applies to what the platform reports.
+    pub fn input(&mut self, events: Vec<egui::Event>) {
         self.time += 1.0 / 60.0;
         let mut raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, self.size)),
             time: Some(self.time),
             focused: true,
+            events,
             ..Default::default()
         };
         self.app.raw_input_hook(&mut raw);

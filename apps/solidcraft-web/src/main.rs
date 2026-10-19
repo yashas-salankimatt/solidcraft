@@ -81,6 +81,23 @@ mod web {
         on_unload.forget();
     }
 
+    /// A finger is followed through its touch events: eframe turns them into the pointer and
+    /// touches, and the app fixes those up (ui-egui's `touch`). The browser reports a finger as
+    /// pointer events too, which eframe would take as a second press and release, and a second
+    /// finger as a press where it lands: those stop here, before eframe sees them.
+    fn keep_fingers_to_touch_events(window: &web_sys::Window) {
+        let touch_pointer = wasm_bindgen::closure::Closure::<dyn Fn(web_sys::PointerEvent)>::new(|e: web_sys::PointerEvent| {
+            if e.pointer_type() == "touch" {
+                e.stop_immediate_propagation();
+            }
+        });
+        for kind in ["pointerdown", "pointerup", "pointercancel"] {
+            let _ = window.add_event_listener_with_callback_and_bool(kind, touch_pointer.as_ref().unchecked_ref(), true);
+        }
+        // The listener lives as long as the page.
+        touch_pointer.forget();
+    }
+
     const JAPANESE_FONT_PATH: &str = "./fonts/BIZUDPGothic-Regular.ttf";
 
     type FontLoadResult = Rc<std::cell::RefCell<Option<Result<Vec<u8>, String>>>>;
@@ -489,6 +506,7 @@ mod web {
         wasm_bindgen_futures::spawn_local(async {
             let Some(window) = web_sys::window() else { return };
             ask_before_unload(&window);
+            keep_fingers_to_touch_events(&window);
             let Some(document) = window.document() else { return };
             let Some(canvas) = document.get_element_by_id(CANVAS_ID).and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok()) else {
                 log::error!("missing <canvas id=\"{CANVAS_ID}\">");

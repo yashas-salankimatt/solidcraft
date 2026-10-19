@@ -336,6 +336,8 @@ pub struct Prefs {
     pub smooth_wheel_zoom: bool,
     /// Two-finger trackpad scroll pans (off: it zooms like the wheel); pinch always zooms.
     pub trackpad_pan: bool,
+    /// Two fingers twisted on a touch screen roll the view (off: they only pan and zoom).
+    pub touch_twist_roll: bool,
     /// Horizontal trackpad and thumb-wheel scrolling pans the view the other way (#2007).
     pub pan_reverse_x: bool,
     /// View changes (axis view, Look At, Home) animate; `look_at_speed` scales how fast.
@@ -458,6 +460,7 @@ impl Default for Prefs {
             zoom_to_cursor: true,
             smooth_wheel_zoom: true,
             trackpad_pan: true,
+            touch_twist_roll: false,
             pan_reverse_x: false,
             look_at_anim: true,
             look_at_speed: 1.0,
@@ -742,6 +745,7 @@ fn defaults(app: &mut SolveApp, page: usize) {
             p.zoom_to_cursor = d.zoom_to_cursor;
             p.smooth_wheel_zoom = d.smooth_wheel_zoom;
             p.trackpad_pan = d.trackpad_pan;
+            p.touch_twist_roll = d.touch_twist_roll;
             p.pan_reverse_x = d.pan_reverse_x;
             p.orbit_around = d.orbit_around;
             p.orbit_cursor = d.orbit_cursor;
@@ -1302,6 +1306,11 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
             ui.label(crate::i18n::tr_label("Reverse horizontal pan direction"));
             ui.checkbox(&mut app.preferences.pan_reverse_x, "")
                 .on_hover_text(crate::i18n::tr_label("Horizontal two-finger scrolling and the thumb wheel pan the other way"));
+            ui.end_row();
+            ui.label(crate::i18n::tr_label("Twist two fingers to roll"));
+            ui.checkbox(&mut app.preferences.touch_twist_roll, "").on_hover_text(crate::i18n::tr_label(
+                "On a touch screen, turning two fingers around each other rolls the view (off: two fingers only pan and zoom)",
+            ));
             ui.end_row();
             ui.label(crate::i18n::tr_label("Orbit around"));
             // Wrapped: three choices, and German or Russian labels are long.

@@ -19,7 +19,7 @@
 - **Viewport.** Click to select, Shift or Ctrl to add, drag for a window or crossing box. To
   reach something under something else (two lines drawn on top of each other, coincident points,
   an edge in front of a face, overlapping bodies), hold the left button still for half a second
-  (long-press on a touch screen) or right-click › **Select Other…**: a list of everything under
+  or right-click › **Select Other…** (on a touch screen: long-press, then **Select Other…**): a list of everything under
   the cursor opens there, the sketch being edited first. Hovering a row lights it up; clicking it
   selects it (Shift or Ctrl adds), and in a command's dialog it goes to the active selection box.
   Esc or a click elsewhere closes the list. Clicking again on the same spot, with nothing changed
@@ -28,6 +28,21 @@
   preset in Preferences switches to SolidWorks, Inventor, Alias, Blender, Tinkercad, OpenSCAD or Touchpad style). On a
   trackpad, pinch zooms and two-finger scroll pans (Navigation › Two-finger scroll pans;
   off: scroll zooms like the wheel); mouse wheels zoom and the thumb wheel pans sideways.
+  On a touch screen (a tablet, a touch laptop, the web app on an iPad), whatever the preset:
+  - tap to select;
+  - drag one finger from the model to orbit (to pan while a sketch is open). A drag that starts on
+    a handle, a dimension or the open sketch's geometry works that instead, and a sketch tool
+    draws with it;
+  - rest a finger for a moment before dragging to select by a box (left to right: window; right
+    to left: crossing);
+  - drag two fingers to pan and pinch to zoom; twisting them rolls the view when
+    Navigation › **Twist two fingers to roll** is on;
+  - tap with two fingers for the context menu (with a tool running: done with it); long-press
+    opens it too;
+  - swipe three fingers left to undo and right to redo.
+
+  A second finger always takes over from the first: a box or a sketch drag the first had started
+  is let go. The page itself never scrolls or zooms under the fingers.
   Shift+middle orbits freely
   in the default and Inventor presets. In every preset, Ctrl+left drag (Cmd on macOS) that starts
   on empty space orbits; a Ctrl+click still adds to the selection. Shift+right-drag snaps to the nearest standard or
