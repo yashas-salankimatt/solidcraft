@@ -392,6 +392,7 @@ pub(crate) fn handle(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &e
         let ctrl_orbit = (mods.ctrl || mods.command) && !mods.shift && !mods.alt && empty_space(app);
         app.viewport.primary_nav = preset.or(ctrl_orbit.then_some(NavMode::Orbit));
         app.viewport.touch_nav = None;
+        app.viewport.touch_press = touch.fingers >= 1 && ui.input(|i| i.any_touches());
         // A single finger: a drag from the model turns the view (pans it where turning is off or a
         // sketch is open), whatever the preset's left button does, unless it starts on something it
         // works (a tool, a handle, a dimension, the open sketch's geometry). It waits to be a drag:
