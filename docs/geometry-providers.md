@@ -124,11 +124,42 @@ version as well as the feature's inputs (a digest of 0, and so every key as befo
 none). A design evaluated with a provider is never shown with that result after the provider is
 gone: it is evaluated again, and the feature fails as it does without one.
 
+## Replay bundles
+
+A replay bundle holds the operations a feature hands to a provider, so they can be tried again
+without the design: in SolidCraft, in a provider program, or by whoever works on the kernel.
+
+- `geometry.fallback_bundle {feature}` bundles the operations a timeline feature hands over.
+  `geometry.fallback_bundle {command, params}` bundles those a command would hand over, tried on a
+  copy of the design: the design itself is left as it is. That is how to bundle a join that just
+  failed and was not kept. Only commands that build geometry can be tried. Both work with no
+  provider installed: then they bundle the operations SolidCraft's kernel could not do.
+- `folder` says where to write it (default: a new folder in `geometry-fallbacks`, beside the crash
+  reports). Under MCP the folder must be one the server may write to.
+- `geometry.fallback_replay {folder}` replays each operation: SolidCraft's kernel on the very
+  bodies it was given, then, where it fails, the installed provider, asked and checked as a
+  feature's evaluation does. The reply has each operation's `kernel_error`, `kernel_ms`,
+  `operands_from` and, when the provider was asked, its `fallback` event.
+
+```text
+bundle.json              format solidcraft-geometry-fallback/1, app, source, provider, requests, error
+request-1.json           the request line, as a provider program reads it on standard input
+request-1-target.step    the operands, to open on their own
+request-1-tool.step
+request-1-target.scbrep  the same bodies in SolidCraft's own encoding: STEP refits intersection
+request-1-tool.scbrep    curves, and the kernel may do on the refit bodies what it could not do
+```
+
+A provider program can be run on a bundle directly:
+`solidcraft-occt-provider < request-1.json`.
+
+A bundle holds no sketches, parameters, other bodies or file names. It does hold the two bodies
+each operation was given, so share it only where those bodies may go. SolidCraft writes it only
+where it is asked to and never sends it anywhere.
+
 ## Not done yet
 
 - A preference for the provider program in the desktop app (today: the environment only).
-- A replay bundle for an operation that was handed over (its operands as STEP and the request,
-  never the design), and a command to replay it locally.
 - The OCCT provider program itself, in its own repository.
 - Fillets and chamfers, shell and offset, sweeps and lofts, and import repair, one at a time.
 - Saving a kept result with the design, so a computer without the provider can still show,

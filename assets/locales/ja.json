@@ -412,6 +412,8 @@
   "cmd.file_insert_step": "STEP を挿入",
   "cmd.file_save_mesh": "メッシュとして保存",
   "cmd.file_slicers": "インストール済みのスライサー",
+  "cmd.geometry_fallback_bundle": "ジオメトリフォールバックバンドルを書き出す",
+  "cmd.geometry_fallback_replay": "ジオメトリフォールバックバンドルを再生",
   "cmd.geometry_providers": "ジオメトリプロバイダー",
   "cmd.inspect_accessibility": "アクセシビリティ解析",
   "cmd.inspect_center_of_mass": "重心",

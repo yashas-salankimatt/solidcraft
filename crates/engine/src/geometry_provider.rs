@@ -311,7 +311,7 @@ mod tests {
     #[cfg(unix)]
     fn request() -> ProviderRequest {
         let operation = ProviderOperation::Boolean { kind: solidcraft_kernel::BoolOp::Cut };
-        ProviderRequest { operation, operands: vec!["A".into(), "B".into()], tolerance_mm: 1e-6 }
+        ProviderRequest { operation, operands: vec!["A".into(), "B".into()], tolerance_mm: 1e-6, native: Vec::new() }
     }
 
     #[test]

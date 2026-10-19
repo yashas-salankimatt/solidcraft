@@ -168,7 +168,7 @@ pub fn utc(secs: u64) -> String {
     format!("{y:04}-{m:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
 }
 
-fn stamp(secs: u64) -> String {
+pub(crate) fn stamp(secs: u64) -> String {
     let (y, m, d, h, mi, s) = civil(secs);
     format!("{y:04}{m:02}{d:02}-{h:02}{mi:02}{s:02}")
 }

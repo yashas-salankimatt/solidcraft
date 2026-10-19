@@ -36,6 +36,12 @@ pub trait GeometryProvider: Send + Sync {
     fn describe(&self) -> serde_json::Value {
         serde_json::Value::Null
     }
+    /// Whether requests should also carry the operands in SolidCraft's own encoding
+    /// ([`ProviderRequest::native`]): a replay bundle's recorder does, so a replay builds the
+    /// very bodies the kernel failed on. A provider program never gets them.
+    fn wants_native_operands(&self) -> bool {
+        false
+    }
 }
 
 /// An operation a provider is asked to do.
@@ -71,6 +77,10 @@ pub struct ProviderRequest {
     pub operands: Vec<String>,
     /// The distance under which two points are the same, in millimetres.
     pub tolerance_mm: f64,
+    /// The operands in SolidCraft's native B-rep encoding, when the provider asked for them
+    /// ([`GeometryProvider::wants_native_operands`]); never part of the wire form.
+    #[serde(skip)]
+    pub native: Vec<Vec<u8>>,
 }
 
 /// A provider's answer: the result as STEP text, whose solids are the result's pieces.
@@ -281,8 +291,8 @@ fn fall_back(a: &Body, b: &Body, op: BoolOp, kernel: Result<Option<Body>>, kerne
         check_ms: 0.0,
     };
     let asked = web_time::Instant::now();
-    let reply =
-        request(a, b, operation).and_then(|request| crate::guard("geometry provider", || provider.run(&request).map_err(KernelError::Failed)));
+    let reply = request(a, b, operation, provider.wants_native_operands())
+        .and_then(|request| crate::guard("geometry provider", || provider.run(&request).map_err(KernelError::Failed)));
     event.provider_ms = ms(asked);
     let result = match reply {
         Err(e) => {
@@ -318,14 +328,66 @@ fn fall_back(a: &Body, b: &Body, op: BoolOp, kernel: Result<Option<Body>>, kerne
     }
 }
 
-/// The request for `operation` on `a` and `b`.
-fn request(a: &Body, b: &Body, operation: ProviderOperation) -> Result<ProviderRequest> {
+/// One request replayed (`geometry.fallback_replay`): SolidCraft's kernel on the operands it
+/// carries, then, when the kernel fails and there is a provider, the provider asked and its
+/// result checked as an evaluation asks and checks it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Replay {
+    /// The operation (`boolean cut`).
+    pub operation: String,
+    /// Why SolidCraft's kernel could not do it; `None` when it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kernel_error: Option<String>,
+    pub kernel_ms: f64,
+    /// What the operands were built from: `native` (the very bodies the operation was given) or
+    /// `step` (read back from STEP, which can differ by the fit of their intersection curves).
+    pub operands_from: &'static str,
+    /// What the provider did, when it was asked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<FallbackEvent>,
+}
+
+/// Replay `request` (see [`Replay`]). The operands are its native ones when it carries them, else
+/// read back from their STEP text, which can differ from the bodies it was written from by the fit
+/// of their intersection curves: the kernel may then do what it could not do on the originals.
+pub fn replay(request: &ProviderRequest, provider: Option<&dyn GeometryProvider>) -> Result<Replay> {
+    let ProviderOperation::Boolean { kind } = request.operation;
+    let ([a, b], operands_from) = match request.native.as_slice() {
+        [na, nb] => ([crate::decode_native_body(na)?, crate::decode_native_body(nb)?], "native"),
+        _ => (operands(request)?, "step"),
+    };
+    let started = web_time::Instant::now();
+    let kernel = crate::guard("replayed boolean", || crate::boolean(&a, &b, kind));
+    let kernel_ms = ms(started);
+    let kernel_error = kernel.as_ref().err().map(ToString::to_string);
+    let fallback = provider.and_then(|p| capture_fallbacks(|| fall_back(&a, &b, kind, kernel, kernel_ms, p)).1.into_iter().next());
+    Ok(Replay { operation: request.operation.label(), kernel_error, kernel_ms, operands_from, fallback })
+}
+
+/// The bodies a Boolean request's operands hold.
+fn operands(request: &ProviderRequest) -> Result<[Body; 2]> {
+    let [a, b] = request.operands.as_slice() else {
+        return Err(KernelError::Invalid(format!("a Boolean takes two operands; the request has {}", request.operands.len())));
+    };
+    let body = |step: &str, which: &str| -> Result<Body> {
+        let import = crate::step_import(step).map_err(|e| KernelError::Invalid(format!("the {which}'s STEP could not be read: {e}")))?;
+        crate::ops::join_pieces(import.bodies.into_iter().map(|piece| piece.body).collect())?
+            .ok_or_else(|| KernelError::Invalid(format!("the {which} has no solid")))
+    };
+    Ok([body(a, "target")?, body(b, "tool")?])
+}
+
+/// The request for `operation` on `a` and `b` (with their native encoding when `native`).
+fn request(a: &Body, b: &Body, operation: ProviderOperation, native: bool) -> Result<ProviderRequest> {
     let step = |body: &Body| {
         crate::step_export_bodies(&[crate::ExportBody { name: "Operand".into(), body, color: None }], &crate::StepHeader::default())
             .map_err(|e| KernelError::Failed(format!("the operands could not be written as STEP: {e}")))
     };
     let tolerance_mm = (a.size().max(b.size()) * 1e-7).max(1e-7);
-    Ok(ProviderRequest { operation, operands: vec![step(a)?, step(b)?], tolerance_mm })
+    // A body the native encoding refuses is replayed from its STEP instead.
+    let native =
+        if native { [a, b].iter().map(|x| crate::encode_native_body(x)).collect::<Result<Vec<_>>>().unwrap_or_default() } else { Vec::new() };
+    Ok(ProviderRequest { operation, operands: vec![step(a)?, step(b)?], tolerance_mm, native })
 }
 
 /// Most pieces a provider's result may have.
@@ -666,11 +728,33 @@ mod tests {
     }
 
     #[test]
+    fn a_request_replays_from_its_operands() {
+        let (a, b) = operands();
+        let asked = request(&a, &b, ProviderOperation::Boolean { kind: BoolOp::Cut }, true).unwrap();
+        assert_eq!(asked.native.len(), 2);
+        assert_eq!(replay(&asked, None).unwrap().operands_from, "native");
+        // As a bundle carries it: through its JSON.
+        let carried: ProviderRequest = serde_json::from_str(&serde_json::to_string(&asked).unwrap()).unwrap();
+        assert!(carried.native.is_empty(), "the native operands are not part of the wire form");
+        let r = replay(&carried, None).unwrap();
+        assert_eq!((r.operation.as_str(), r.kernel_error.as_ref(), r.operands_from, r.fallback.as_ref()), ("boolean cut", None, "step", None));
+        let provider = Fixed::new(Ok(step(&a)));
+        assert!(replay(&carried, Some(provider.as_ref())).unwrap().fallback.is_none(), "a provider is asked only when the kernel fails");
+        let mut one = carried.clone();
+        one.operands.truncate(1);
+        assert!(replay(&one, None).unwrap_err().to_string().contains("two operands"));
+        let mut junk = carried;
+        junk.operands[1] = "solid".into();
+        assert!(replay(&junk, None).unwrap_err().to_string().contains("tool's STEP"));
+    }
+
+    #[test]
     fn requests_and_replies_have_a_stable_wire_form() {
         let request = ProviderRequest {
             operation: ProviderOperation::Boolean { kind: BoolOp::Cut },
             operands: vec!["A".into(), "B".into()],
             tolerance_mm: 1e-6,
+            native: Vec::new(),
         };
         let json = serde_json::to_value(&request).unwrap();
         assert_eq!(json, serde_json::json!({"op": "boolean", "kind": "cut", "operands": ["A", "B"], "tolerance_mm": 1e-6}));
