@@ -156,11 +156,17 @@ pub struct FallbackEvent {
     pub check_ms: f64,
 }
 
+/// The kernel's first reason in an error (`boolean Union: no result`): the whole of it, every
+/// retry included, is in [`FallbackEvent::kernel_error`].
+fn first_reason(kernel_error: &str) -> String {
+    kernel_error.split("; ").next().unwrap_or(kernel_error).replace("the operation failed: ", "")
+}
+
 impl FallbackEvent {
     /// The event in words, for a feature's warning or error.
     pub fn description(&self) -> String {
         let FallbackEvent { operation, kernel_error, provider, .. } = self;
-        let kernel_error = kernel_error.trim_start_matches("the operation failed: ");
+        let kernel_error = first_reason(kernel_error);
         match self.outcome {
             FallbackOutcome::Accepted => format!(
                 "the {operation} was made by the {provider} geometry provider in {:.0} ms because SolidCraft's kernel could not do it \
@@ -188,7 +194,7 @@ pub fn warning(events: &[FallbackEvent]) -> Option<String> {
              (first: {}); their faces are named from geometry, so check features that refer to them after an edit",
             accepted.len(),
             first.provider,
-            first.kernel_error.trim_start_matches("the operation failed: ")
+            first_reason(&first.kernel_error)
         )),
     }
 }
@@ -540,6 +546,7 @@ mod tests {
             assert_eq!((e.outcome, e.provider.as_str(), e.reason.as_deref()), (FallbackOutcome::Accepted, "fixed", None), "{op:?}");
             assert!(e.kernel_error.contains("no result"));
             assert!(e.description().contains("named from geometry"), "{}", e.description());
+            assert!(e.description().contains(&format!("(boolean {op:?}: no result)")), "the kernel's first reason: {}", e.description());
         }
     }
 
