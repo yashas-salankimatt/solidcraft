@@ -541,6 +541,12 @@ fn main() -> eframe::Result {
     // module on Windows, and on every system the startup step the app was in.
     #[cfg(target_os = "windows")]
     native_crash::install();
+    // A geometry provider program takes the Booleans the kernel cannot do (docs/geometry-providers.md).
+    match solidcraft_engine::geometry_provider::install_from_env() {
+        Ok(Some(provider)) => log::info!("geometry provider: {provider}"),
+        Ok(None) => {}
+        Err(e) => log::warn!("geometry provider not used: {e}"),
+    }
     eframe::egui_wgpu::set_startup_hook(startup_step);
     solidcraft_engine::crash::phase("window");
     let options = eframe::NativeOptions {

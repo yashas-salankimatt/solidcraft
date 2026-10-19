@@ -31,6 +31,11 @@ pub trait GeometryProvider: Send + Sync {
     fn version(&self) -> &str;
     /// Do one operation. An error is the provider's own message.
     fn run(&self, request: &ProviderRequest) -> std::result::Result<ProviderReply, String>;
+    /// More about the provider as a JSON object (its program, the operations it does), for
+    /// `geometry.providers`.
+    fn describe(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
 }
 
 /// An operation a provider is asked to do.

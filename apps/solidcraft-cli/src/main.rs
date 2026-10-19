@@ -73,6 +73,13 @@ const USAGE: &str = "usage:
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // A geometry provider program takes the Booleans the kernel cannot do (docs/geometry-providers.md).
+    // Said on standard error, and only when one is named: standard output stays the command's.
+    match solidcraft_engine::geometry_provider::install_from_env() {
+        Ok(Some(provider)) => eprintln!("geometry provider: {provider}"),
+        Ok(None) => {}
+        Err(e) => eprintln!("geometry provider not used: {e}"),
+    }
     let r = match args.first().map(String::as_str) {
         Some("run") => cmd_run(&args[1..]),
         Some("eval" | "inspect") => cmd_eval(&args[1..]),
