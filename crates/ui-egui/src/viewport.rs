@@ -123,6 +123,8 @@ pub struct ViewportState {
     pub(crate) touch_nav: Option<(NavMode, bool)>,
     /// Two or more fingers are moving the view (until all are up), and they began over it.
     pub(crate) touch_multi: bool,
+    /// The last primary press came from a finger (touch mode's taps add to the selection).
+    pub(crate) touch_press: bool,
     /// A primary press on the axis gizmo: the pointer position used by its last orbit step.
     pub axis_drag: Option<Pos2>,
     /// Unsnapped camera while Shift-orbit previews a standard or diagonal view.
@@ -2540,6 +2542,10 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
     // Selection chords via resolve (add-only Shift is a preference; default both toggle).
     let held_mods = crate::tool_modifiers::Held::from_modifiers(mods);
     let (add, allow_toggle) = crate::tool_modifiers::selection_click(held_mods, app.preferences.selection_shift_add_only);
+    // In touch mode a tap adds to the selection, or takes out what is selected (a tap on empty
+    // space still clears).
+    let tap_adds = app.viewport.touch_press && crate::touch_mode::active(app);
+    let (add, allow_toggle) = if tap_adds && !add { (true, true) } else { (add, allow_toggle) };
     crate::sketch_text::set_one_letter(mods.shift);
     if let Some(p) = hover.filter(|_| inside) {
         if app.tool.is_some() {
@@ -2603,7 +2609,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
                         None if !add && !resp.double_clicked() && crate::select_other::cycle_click(app, &proj, p) => {}
                         None => {
                             let sel = cand.and_then(|c| c.1);
-                            select(app, sel.clone(), add, allow_toggle);
+                            select(app, sel.clone(), add && !(tap_adds && sel.is_none()), allow_toggle);
                             crate::select_other::note_click(app, p, if add { None } else { sel });
                         }
                     }
@@ -2909,6 +2915,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
     crate::select_other::show(app, ui.ctx());
     axis_view(app, ui, rect);
     nav_bar(app, ui, rect);
+    crate::touch_mode::selection_bar(app, ui.ctx(), rect, nav_bar_rect(app, rect, 0.0).top());
     // A command recomputing the history off the window thread (the marker moved, undo): the
     // window goes on, and says so above the status chip.
     if let Some(since) = app.computing_since() {
@@ -3588,6 +3595,15 @@ pub fn look_at_selection(app: &mut SolveApp) {
     }
 }
 
+/// Where the view's controls (orbit, pan, zoom…) sit in the viewport `rect`, `w` wide.
+fn nav_bar_rect(app: &SolveApp, rect: Rect, w: f32) -> Rect {
+    app.viewport
+        .layout
+        .as_ref()
+        .map(|l| l.navigation)
+        .unwrap_or_else(|| Rect::from_center_size(pos2(rect.center().x, rect.bottom() - 22.0), vec2(w, 30.0)))
+}
+
 fn nav_bar(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect) {
     if app.viewport.layout.as_ref().is_some_and(|l| !l.navigation.is_positive()) {
         return;
@@ -3617,12 +3633,7 @@ fn nav_bar(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect) {
     let menu_id = ui.id().with("nav_view_menu");
     let mut menu_open = ui.data(|d| d.get_temp::<bool>(menu_id)).unwrap_or(false);
     let w = items.len() as f32 * 30.0 + 10.0;
-    let bar = app
-        .viewport
-        .layout
-        .as_ref()
-        .map(|l| l.navigation)
-        .unwrap_or_else(|| Rect::from_center_size(pos2(rect.center().x, rect.bottom() - 22.0), vec2(w, 30.0)));
+    let bar = nav_bar_rect(app, rect, w);
     crate::scenario::publish_rect("nav:outer", bar);
     let active = ui.rect_contains_pointer(bar)
         || ui.rect_contains_pointer(axis_rect(app, rect))

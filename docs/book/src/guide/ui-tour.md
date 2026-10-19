@@ -82,6 +82,27 @@ Command messages and errors show for a few seconds in the status chip at the bot
 Help › Keyboard Shortcuts lists every key, and File › Keyboard
 Shortcuts changes them.
 
+### Touch mode
+
+General › **Touch mode** lays SolidCraft out for fingers. **Automatic** (the default) turns it on
+in a browser whose main pointer is a finger (a tablet or a phone); **On** and **Off** choose for
+any screen.
+
+- The toolbar gives way to a column of large buttons along the left edge (General › **Tools on
+  the right** moves it to the right edge). Its first button names the tab (SOLID, SURFACE…) and
+  lists the tabs and workspaces; each button below opens one panel's commands beside the column,
+  in more than one column when the list is long. Tap a command to start it.
+- With something selected, the column also shows the first actions of its context menu, and
+  **More** for the whole menu. The panels keep their places.
+- Undo and Redo sit at the column's foot, where the thumb rests; **Done** above them finishes a
+  running tool.
+- Everything is drawn 20 % larger (on top of General › Interface scale), and a finger may move a
+  little further than a mouse and still tap.
+- A tap adds to the selection, or takes out what is already selected; a tap on empty space
+  clears it.
+
+The touch gestures above work the same in both layouts.
+
 ### Colour themes
 
 General › **Theme** lists Dark, Light and System (follows the operating system), the built-in

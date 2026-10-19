@@ -336,6 +336,11 @@ pub struct Prefs {
     /// Draw the parts browser on a translucent card over the 3D view instead of a column of its
     /// own, so the workspace keeps the whole window width.
     pub browser_float: bool,
+    /// Touch mode: the layout for fingers, a column of large buttons beside the model
+    /// (`touch_mode`). Automatic turns it on where the main pointer is a finger.
+    pub touch_mode: crate::touch_mode::TouchMode,
+    /// Touch mode's column along the right edge instead of the left.
+    pub touch_column_right: bool,
     /// The wheel zooms toward the point under the cursor (else toward the view's centre).
     pub zoom_to_cursor: bool,
     /// Spread discrete wheel input across frames (off: apply each event immediately).
@@ -476,6 +481,8 @@ impl Default for Prefs {
             timeline_left_browser_collapsed: false,
             browser_width: DEFAULT_BROWSER_WIDTH,
             browser_float: false,
+            touch_mode: crate::touch_mode::TouchMode::Auto,
+            touch_column_right: false,
             zoom_to_cursor: true,
             smooth_wheel_zoom: true,
             trackpad_pan: true,
@@ -733,6 +740,8 @@ fn defaults(app: &mut SolveApp, page: usize) {
             p.language = d.language;
             p.ui_scale = d.ui_scale;
             p.ui_font = d.ui_font;
+            p.touch_mode = d.touch_mode;
+            p.touch_column_right = d.touch_column_right;
             p.timeline_left = d.timeline_left;
             p.timeline_left_height = d.timeline_left_height;
             p.timeline_left_browser_collapsed = d.timeline_left_browser_collapsed;
@@ -858,7 +867,8 @@ pub fn apply(app: &mut SolveApp, ctx: &egui::Context) {
     }
     // Scaling while the pointer is held moves the slider under the pointer, feeding a
     // different value back into it. Commit the layout change after the drag ends.
-    let z = app.preferences.ui_scale.clamp(0.5, 2.5);
+    let z = crate::touch_mode::scale(app, app.preferences.ui_scale.clamp(0.5, 2.5));
+    crate::touch_mode::apply(app, ctx);
     if z.is_finite() && !ctx.input(|i| i.pointer.any_down()) && (ctx.zoom_factor() - z).abs() > 1e-3 {
         ctx.set_zoom_factor(z);
     }
@@ -1275,6 +1285,19 @@ fn page(app: &mut SolveApp, ui: &mut egui::Ui, t: &Tokens) {
             ui.checkbox(&mut app.preferences.browser_float, float_label);
             ui.end_row();
             note(ui, app.tr_label("The tree draws on a translucent card over the 3D view instead of a column of its own."));
+            ui.label(app.tr("ui.touch_mode"));
+            ui.horizontal_wrapped(|ui| {
+                for mode in crate::touch_mode::TouchMode::ALL {
+                    let r = ui.radio_value(&mut app.preferences.touch_mode, mode, crate::i18n::tr_label(mode.label()));
+                    crate::scenario::publish_rect(&format!("prefs:touch_mode:{mode:?}"), r.rect);
+                }
+            });
+            ui.end_row();
+            ui.label("");
+            let right_label = app.tr("ui.touch_column_right").to_string();
+            ui.add_enabled(crate::touch_mode::active(app), egui::Checkbox::new(&mut app.preferences.touch_column_right, right_label));
+            ui.end_row();
+            note(ui, app.tr("ui.touch_mode_note"));
             ui.label(app.tr("ui.units_of_new_designs"));
             egui::ComboBox::from_id_salt("pref_units").selected_text(app.preferences.default_units.clone()).show_ui(ui, |ui| {
                 for u in UNITS {
