@@ -13,6 +13,7 @@ pub mod control_auth;
 pub mod crash;
 pub mod frames;
 pub mod fuzz;
+pub mod geometry_bundle;
 pub mod geometry_provider;
 pub mod licences;
 pub mod occurrences;

@@ -157,3 +157,91 @@ fn a_provider_is_never_asked_for_what_the_kernel_can_do() {
         assert!(doc["timeline"].as_array().unwrap().iter().all(|e| e.get("geometry_fallbacks").is_none() && e["warning"].is_null()), "{doc}");
     });
 }
+
+fn scratch(tag: &str) -> String {
+    let d = std::env::temp_dir().join(format!("solidcraft-fallback-bundle-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    d.to_string_lossy().into_owned()
+}
+
+/// The join the kernel cannot do, bundled without a provider (tried on a copy: the design keeps
+/// one cylinder), holds its two operands and the request and nothing of the design; replayed,
+/// it says what the kernel does with the operands and what a provider makes of them.
+#[test]
+fn a_failing_join_is_bundled_and_replays_without_the_design() {
+    let folder = scratch("join");
+    let index = with_provider(None, || {
+        let mut s = Session::default();
+        first(&mut s);
+        let out = run(&mut s, "geometry.fallback_bundle", json!({"command": "solid.cylinder", "params": crossing(), "folder": folder}));
+        assert_eq!(s.doc.features.len(), 1, "the design is left as it is");
+        assert_eq!(out["requests"], json!(1), "{out}");
+        out["bundle"].clone()
+    });
+    assert_eq!(index["format"], json!("solidcraft-geometry-fallback/1"));
+    assert!(index["error"].as_str().is_some_and(|e| e.contains("boolean Union")), "{index}");
+    assert_eq!(index["requests"][0]["operation"], json!("boolean union"));
+    let dir = std::path::Path::new(&folder);
+    let mut files: Vec<String> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    files.sort();
+    assert_eq!(
+        files,
+        ["bundle.json", "request-1-target.scbrep", "request-1-target.step", "request-1-tool.scbrep", "request-1-tool.step", "request-1.json"]
+    );
+    // The request is the line a provider program reads.
+    let line = std::fs::read_to_string(dir.join("request-1.json")).unwrap();
+    let request: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(
+        (request["protocol"].clone(), request["op"].clone(), request["kind"].clone()),
+        (json!("solidcraft-geometry-provider/1"), json!("boolean"), json!("union"))
+    );
+    assert!(!line.contains("\"A\"") && !std::fs::read_to_string(dir.join("bundle.json")).unwrap().contains("sketch"), "nothing of the design");
+    // Replayed without a provider: the kernel on the very bodies it failed on.
+    let plain = with_provider(None, || {
+        let mut s = Session::default();
+        run(&mut s, "geometry.fallback_replay", json!({"folder": folder}))
+    });
+    let replayed = &plain["replays"][0];
+    assert_eq!((replayed["operation"].clone(), replayed["operands_from"].clone()), (json!("boolean union"), json!("native")));
+    assert!(replayed["kernel_error"].as_str().is_some_and(|e| e.contains("boolean Union")), "the kernel fails on them again: {plain}");
+    assert!(replayed.get("fallback").is_none());
+    // With a provider the replay asks it and checks its answer as an evaluation does.
+    let p: Arc<dyn GeometryProvider> = Answer::new(near_answer());
+    let with = with_provider(Some(p), || {
+        let mut s = Session::default();
+        run(&mut s, "geometry.fallback_replay", json!({"folder": folder}))
+    });
+    assert_eq!(with["replays"][0]["fallback"]["outcome"], json!("accepted"), "{with}");
+    assert_eq!(with["provider"]["provider"], json!("test"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_feature_bundle_holds_only_its_own_operations() {
+    let folder = scratch("feature");
+    let p: Arc<dyn GeometryProvider> = Answer::new(near_answer());
+    with_provider(Some(p), || {
+        let mut s = Session::default();
+        first(&mut s);
+        run(&mut s, "solid.cylinder", crossing());
+        run(
+            &mut s,
+            "solid.box",
+            json!({"corner": [-5, 25, -12], "length": 10, "width": 5, "height": 5, "operation": "join", "targets": ["A"], "name": "Lug"}),
+        );
+        let out = run(&mut s, "geometry.fallback_bundle", json!({"feature": "Crossing", "folder": folder}));
+        assert_eq!(out["requests"], json!(1), "{out}");
+        assert_eq!(out["bundle"]["source"]["feature"]["name"], json!("Crossing"));
+        assert_eq!(out["bundle"]["provider"]["provider"], json!("test"));
+        let none = s.execute("geometry.fallback_bundle", &json!({"feature": "Lug", "folder": folder})).unwrap_err().to_string();
+        assert!(none.contains("nothing to bundle"), "{none}");
+        for refused in
+            [json!({"command": "file.save", "params": {"path": "/tmp/x.solidcraft"}}), json!({"command": "geometry.fallback_bundle"}), json!({})]
+        {
+            assert!(s.execute("geometry.fallback_bundle", &refused).is_err(), "{refused}");
+        }
+        let missing = s.execute("geometry.fallback_replay", &json!({"folder": scratch("missing")})).unwrap_err().to_string();
+        assert!(missing.contains("bundle.json"), "{missing}");
+    });
+    let _ = std::fs::remove_dir_all(&folder);
+}
