@@ -249,6 +249,9 @@ pub(crate) struct CameraInput {
     pub primary_nav: Option<NavMode>,
     /// The navigation this frame's pointer input drives.
     pub mode: Option<NavMode>,
+    /// Two or more fingers are on a touch screen, or were in a gesture that just ended: clicks,
+    /// drags and box selection wait until all are up.
+    pub touch_gesture: bool,
 }
 
 /// Camera input for one frame over `rect`: the navigation preset's buttons and modifiers, Orbit
@@ -315,8 +318,11 @@ pub(crate) fn handle(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &e
     } else {
         scroll
     };
-    // Pinch-to-zoom (trackpad): direct manipulation, never smoothed.
-    let pinch = ui.input(pinch_factor);
+    // Fingers on a touch screen (one shared gesture layer for every camera page).
+    let touch = ui.input(|i| app.viewport.touch.update(&i.events, i.time));
+    // Pinch-to-zoom (trackpad): direct manipulation, never smoothed. Fingers on a screen zoom by
+    // their own spread instead (a browser may report their pinch as well).
+    let pinch = if touch.fingers >= 2 || touch.multi() { 1.0 } else { ui.input(pinch_factor) };
     let h = rect.height().max(1.0) as f64;
     if inside && pinch != 1.0 {
         app.viewport.orbit_snap = None;
@@ -386,8 +392,87 @@ pub(crate) fn handle(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &e
         // still selects, and Ctrl on geometry still drags it without snapping.
         let ctrl_orbit = (mods.ctrl || mods.command) && !mods.shift && !mods.alt && empty_space(app);
         app.viewport.primary_nav = preset.or(ctrl_orbit.then_some(NavMode::Orbit));
+        app.viewport.touch_nav = None;
+        // A single finger: a drag from the model turns the view (pans it where turning is off or a
+        // sketch is open), whatever the preset's left button does, unless it starts on something it
+        // works (a tool, a handle, a dimension, the open sketch's geometry). It waits to be a drag:
+        // a tap still selects, and a finger that rested first selects by a box instead.
+        if touch.fingers == 1 && touch.most == 1 && ui.input(|i| i.any_touches()) {
+            let proj = projection(app, rect);
+            let works = hover.is_some_and(|p| {
+                (picking && crate::canvas::owns_pointer(app, &proj, p))
+                    || crate::dim_view::hit(p).is_some()
+                    || crate::sketch_tools::glyph_at(p).is_some()
+                    || (app.session.active_sketch.is_some() && !pick(app, &proj, p).is_empty())
+            });
+            if app.tool.is_none() && app.viewport.nav.is_none() && app.viewport.context_menu.is_none() && !works {
+                let turn = caps.orbit && app.session.active_sketch.is_none();
+                let mode = if turn { NavMode::Orbit } else { NavMode::Pan };
+                app.viewport.primary_nav = Some(mode);
+                app.viewport.touch_nav = Some((mode, false));
+            }
+        }
     } else if !primary_down && !primary_released {
         app.viewport.primary_nav = None;
+        app.viewport.touch_nav = None;
+    }
+    // The finger moved clearly: after resting it selects by a box (the box selection takes the
+    // drag from where it pressed), else it turns or pans the view.
+    if let Some((mode, false)) = app.viewport.touch_nav
+        && touch.travel > crate::touch::SLOP
+    {
+        if touch.held >= crate::touch::HOLD {
+            app.viewport.primary_nav = None;
+            app.viewport.touch_nav = None;
+        } else {
+            app.viewport.touch_nav = Some((mode, true));
+        }
+    }
+    let touch_waiting = matches!(app.viewport.touch_nav, Some((_, false)));
+    // Two or more fingers: they pan, pinch to zoom and (when that is on) twist to roll the view.
+    // They take over from the first finger: whatever it had started is let go, and the tools stand
+    // down until every finger is up.
+    if touch.multi() && !app.viewport.touch_multi && touch.center.is_some_and(|c| rect.contains(c) && !axes.contains(c)) {
+        app.viewport.touch_multi = true;
+        let_go(app);
+    }
+    let touch_gesture = touch.multi() || touch.cancelled;
+    if app.viewport.touch_multi {
+        app.viewport.primary_nav = Some(NavMode::Pan);
+        app.viewport.touch_nav = None;
+        app.viewport.orbit_snap = None;
+        app.viewport.orbit_free = None;
+        if touch.fingers == 2 && (touch.pan != egui::Vec2::ZERO || touch.zoom != 1.0 || touch.roll != 0.0) {
+            app.cancel_view_animation();
+            if touch.zoom != 1.0 {
+                let f = f64::from(touch.zoom).powf(-crate::prefs::zoom_sign(app));
+                let anchor = zoom_anchor(app, rect, touch.center, caps.orbit);
+                app.cam.zoom_at(f, anchor);
+            }
+            if touch.pan != egui::Vec2::ZERO {
+                app.cam.pan(f64::from(touch.pan.x), f64::from(touch.pan.y), h);
+            }
+            if touch.roll != 0.0 && app.preferences.touch_twist_roll && caps.orbit && app.session.active_sketch.is_none() {
+                app.cam.roll_by(f64::from(touch.roll));
+            }
+        }
+        if touch.fingers == 0 {
+            app.viewport.touch_multi = false;
+        }
+    }
+    match touch.ended {
+        // A quick two-finger tap is the right button's click: the context menu, or done with a tool.
+        Some(crate::touch::Gesture::TwoFingerTap(p)) if rect.contains(p) && !axes.contains(p) => {
+            if app.tool.is_some() {
+                crate::tools::finish(app);
+            } else if app.dialog.is_none() {
+                crate::context_menu::open(app, p);
+            }
+        }
+        // A three-finger swipe left undoes, right redoes.
+        Some(crate::touch::Gesture::SwipeLeft) => drop(app.run("edit.undo", json!({}))),
+        Some(crate::touch::Gesture::SwipeRight) => drop(app.run("edit.redo", json!({}))),
+        _ => {}
     }
     // Hold Space for a momentary pan: the hand tool of design apps. It overrides whatever the
     // left button would otherwise do - selecting, dragging geometry, the preset's binding or the
@@ -409,7 +494,8 @@ pub(crate) fn handle(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &e
     } else {
         None
     };
-    let dragging = resp.dragged() || (inside && button.is_some());
+    // A finger waiting to be a drag doesn't move the view yet, and fingers move it themselves.
+    let dragging = (resp.dragged() || (inside && button.is_some())) && !touch_waiting && !app.viewport.touch_multi;
     // Without orbit (a flat page), bindings that orbit do nothing.
     let allowed = |m: NavMode| caps.orbit || m != NavMode::Orbit;
     let motion = modifier_motion(app, ui, inside, hover, mods, picking).filter(|(m, _)| allowed(*m));
@@ -517,7 +603,42 @@ pub(crate) fn handle(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &e
     if app.viewport.orbit_snap.is_some() {
         ui.ctx().request_repaint();
     }
-    CameraInput { hover, scroll, mods, middle, secondary_down, primary_down, primary_pressed, delta, inside, axes, pinch, pan, primary_nav, mode }
+    CameraInput {
+        hover,
+        scroll,
+        mods,
+        middle,
+        secondary_down,
+        primary_down,
+        primary_pressed,
+        delta,
+        inside,
+        axes,
+        pinch,
+        pan,
+        primary_nav,
+        mode,
+        touch_gesture,
+    }
+}
+
+/// A second finger takes over: what the first had started is let go. A box selection is dropped,
+/// a two-point shape's first point taken back, and a sketch drag undone.
+fn let_go(app: &mut SolveApp) {
+    app.viewport.boxsel = None;
+    if app.viewport.draw_drag {
+        app.viewport.draw_drag = false;
+        if let Some(tool) = app.tool.as_mut() {
+            tool.pts.clear();
+        }
+    }
+    if let Some((_, depth, _)) = app.viewport.point_drag.take() {
+        crate::drag_snap::clear();
+        let _ = app.session.execute("sketch.drag_end", &json!({}));
+        app.session.undo.truncate(depth + 1);
+        let _ = app.run("edit.undo", json!({}));
+    }
+    crate::sketch_text_move::cancel_drag(app);
 }
 
 /// The 3D mouse's motion this frame (#1336), on a page `rect` whose camera may do `caps`: the cap
