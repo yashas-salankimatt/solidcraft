@@ -12,8 +12,14 @@
 //! from the tool, and its surface where the operands' surfaces say it must be. Every attempt is
 //! recorded ([`FallbackEvent`]), so a result a provider made is never passed off as the
 //! kernel's. Its faces carry no history: they are named from geometry (unverified).
+//!
+//! A kept result can be saved with the design and offered back while it evaluates
+//! ([`with_saved_results`]). It is used, after the same checks, only when the operation comes back
+//! with exactly the operands it was made from and no provider gives a result now: so a computer
+//! without the provider (the browser) still shows, measures and exports what one made.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
@@ -148,6 +154,9 @@ pub enum FallbackOutcome {
     Refused,
     /// It gave no result (its own error, or it could not be reached).
     Failed,
+    /// No provider gave a result, and the one a provider made before and the design saved, for
+    /// exactly these operands, passed the checks and was kept.
+    Saved,
 }
 
 /// One operation handed to a provider.
@@ -169,6 +178,12 @@ pub struct FallbackEvent {
     pub provider_ms: f64,
     /// Time checking the provider's result.
     pub check_ms: f64,
+    /// The request's digest ([`request_digest`]): what a kept result is saved under.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub request: String,
+    /// A kept result, as STEP text, for the design to save; not reported.
+    #[serde(skip)]
+    pub result_step: Option<Arc<str>>,
 }
 
 /// The kernel's first reason in an error (`boolean Union: no result`): the whole of it, every
@@ -178,6 +193,11 @@ fn first_reason(kernel_error: &str) -> String {
 }
 
 impl FallbackEvent {
+    /// Whether the operation's result is the provider's (made now, or as the design saved it).
+    pub fn kept(&self) -> bool {
+        matches!(self.outcome, FallbackOutcome::Accepted | FallbackOutcome::Saved)
+    }
+
     /// The event in words, for a feature's warning or error.
     pub fn description(&self) -> String {
         let FallbackEvent { operation, kernel_error, provider, .. } = self;
@@ -194,16 +214,29 @@ impl FallbackEvent {
             FallbackOutcome::Failed => {
                 format!("the {provider} geometry provider was tried and failed: {}", self.reason.as_deref().unwrap_or("no reason"))
             }
+            FallbackOutcome::Saved => format!(
+                "the {operation} is the result the {provider} geometry provider ({}) made and the design saved, because SolidCraft's \
+                 kernel could not do it ({kernel_error}) and no provider here made it: it is shown, measured and exported as saved, and \
+                 rebuilding it once what it is given changes needs the {provider} geometry provider",
+                self.provider_version
+            ),
         }
     }
 }
 
 /// The note a feature carries for the operations a provider made for it: none when it made none.
 pub fn warning(events: &[FallbackEvent]) -> Option<String> {
-    let accepted: Vec<&FallbackEvent> = events.iter().filter(|e| e.outcome == FallbackOutcome::Accepted).collect();
+    let accepted: Vec<&FallbackEvent> = events.iter().filter(|e| e.kept()).collect();
     match accepted.as_slice() {
         [] => None,
         [one] => Some(format!("Geometry provider: {}", one.description())),
+        [first, ..] if accepted.iter().any(|e| e.outcome == FallbackOutcome::Saved) => Some(format!(
+            "Geometry provider: {} operations SolidCraft's kernel could not do (first: {}) are results the {} geometry provider made, \
+             some of them as the design saved them: rebuilding those once what they are given changes needs the provider",
+            accepted.len(),
+            first_reason(&first.kernel_error),
+            first.provider
+        )),
         [first, ..] => Some(format!(
             "Geometry provider: {} operations were made by the {} geometry provider because SolidCraft's kernel could not do them \
              (first: {}); their faces are named from geometry, so check features that refer to them after an edit",
@@ -255,14 +288,71 @@ fn record(event: FallbackEvent) {
     });
 }
 
+/// A result a provider made, as a design saved it: offered back by [`with_saved_results`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct SavedResult {
+    pub provider: String,
+    pub version: String,
+    /// The result as STEP text.
+    pub step: Arc<str>,
+}
+
+/// Saved results by request digest.
+pub type SavedResults = HashMap<String, SavedResult>;
+
+thread_local! {
+    static SAVED: RefCell<Option<Arc<SavedResults>>> = const { RefCell::new(None) };
+}
+
+/// Run `f` with `saved` offered to every operation it hands over on this thread (`None`: none).
+pub fn with_saved_results<R>(saved: Option<Arc<SavedResults>>, f: impl FnOnce() -> R) -> R {
+    let previous = SAVED.with(|s| s.replace(saved));
+    struct Restore(Option<Option<Arc<SavedResults>>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some(previous) = self.0.take() {
+                SAVED.with(|s| *s.borrow_mut() = previous);
+            }
+        }
+    }
+    let _restore = Restore(Some(previous));
+    f()
+}
+
+fn saved_results() -> Option<Arc<SavedResults>> {
+    SAVED.with(|s| s.borrow().clone())
+}
+
+/// The digest a request's result is saved under: its operation and each operand's STEP text, with
+/// their lengths, through 64-bit FNV-1a, in hex. Stable across runs and computers; not secure,
+/// and need not be: a saved result is checked against the operands every time it is used.
+pub fn request_digest(request: &ProviderRequest) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |bytes: &[u8]| {
+        for b in bytes.iter().chain(&(bytes.len() as u64).to_le_bytes()) {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    };
+    eat(request.operation.label().as_bytes());
+    for operand in &request.operands {
+        eat(operand.as_bytes());
+    }
+    format!("{h:016x}")
+}
+
 /// [`crate::boolean`], handed to the current provider when SolidCraft's kernel fails with a
-/// geometry error (see the module docs). Exactly [`crate::boolean`] when there is no provider.
+/// geometry error, or answered from a saved result (see the module docs). Exactly
+/// [`crate::boolean`] when there is neither.
 pub fn boolean_with_fallback(a: &Body, b: &Body, op: BoolOp) -> Result<Option<Body>> {
-    let Some(provider) = current() else { return crate::boolean(a, b, op) };
+    let (provider, saved) = (current(), saved_results());
+    if provider.is_none() && saved.is_none() {
+        return crate::boolean(a, b, op);
+    }
     crate::profile::timed(crate::profile::Kind::Boolean, || {
         let started = web_time::Instant::now();
         let kernel = crate::boolean(a, b, op);
-        fall_back(a, b, op, kernel, ms(started), provider.as_ref())
+        fall_back(a, b, op, kernel, ms(started), provider.as_deref(), saved.as_deref())
     })
 }
 
@@ -270,62 +360,108 @@ fn ms(since: web_time::Instant) -> f64 {
     since.elapsed().as_secs_f64() * 1000.0
 }
 
-/// The kernel's result of a Boolean, or `provider`'s when the kernel failed with a geometry
-/// error and the provider's result passes the checks.
-fn fall_back(a: &Body, b: &Body, op: BoolOp, kernel: Result<Option<Body>>, kernel_ms: f64, provider: &dyn GeometryProvider) -> Result<Option<Body>> {
+/// The kernel's result of a Boolean, or, when the kernel failed with a geometry error, `provider`'s
+/// or the one `saved` holds for these operands, whichever comes first and passes the checks.
+fn fall_back(
+    a: &Body,
+    b: &Body,
+    op: BoolOp,
+    kernel: Result<Option<Body>>,
+    kernel_ms: f64,
+    provider: Option<&dyn GeometryProvider>,
+    saved: Option<&SavedResults>,
+) -> Result<Option<Body>> {
     // Bad input (a mesh, a refused shape) is no geometry failure, and a provider gets solids only.
     let error = match kernel {
         Err(e @ (KernelError::Failed(_) | KernelError::Internal(_))) if !a.is_mesh() && !b.is_mesh() => e,
         other => return other,
     };
     let operation = ProviderOperation::Boolean { kind: op };
-    let mut event = FallbackEvent {
+    let event = |provider: &str, version: &str| FallbackEvent {
         operation: operation.label(),
         kernel_error: error.to_string(),
-        provider: provider.id().to_string(),
-        provider_version: provider.version().to_string(),
+        provider: provider.to_string(),
+        provider_version: version.to_string(),
         outcome: FallbackOutcome::Failed,
         reason: None,
         kernel_ms,
         provider_ms: 0.0,
         check_ms: 0.0,
+        request: String::new(),
+        result_step: None,
     };
     let asked = web_time::Instant::now();
-    let reply = request(a, b, operation, provider.wants_native_operands())
-        .and_then(|request| crate::guard("geometry provider", || provider.run(&request).map_err(KernelError::Failed)));
-    event.provider_ms = ms(asked);
-    let result = match reply {
-        Err(e) => {
-            event.reason = Some(e.to_string().trim_start_matches("the operation failed: ").to_string());
-            None
-        }
-        Ok(reply) => {
-            let checking = web_time::Instant::now();
-            let checked = crate::guard("geometry provider result", || Ok(accept(a, b, op, &reply.step))).unwrap_or_else(|e| Err(e.to_string()));
-            event.check_ms = ms(checking);
-            match checked {
-                Ok(body) => {
-                    event.outcome = FallbackOutcome::Accepted;
-                    Some(body)
-                }
-                Err(reason) => {
-                    event.outcome = FallbackOutcome::Refused;
-                    event.reason = Some(reason);
-                    None
+    let request = request(a, b, operation, provider.is_some_and(|p| p.wants_native_operands()));
+    let mut notes = Vec::new();
+    if let Some(provider) = provider {
+        let mut e = event(provider.id(), provider.version());
+        let reply = request
+            .as_ref()
+            .map_err(Clone::clone)
+            .and_then(|request| crate::guard("geometry provider", || provider.run(request).map_err(KernelError::Failed)));
+        e.provider_ms = ms(asked);
+        e.request = request.as_ref().map(request_digest).unwrap_or_default();
+        match reply {
+            Err(why) => e.reason = Some(why.to_string().trim_start_matches("the operation failed: ").to_string()),
+            Ok(reply) => {
+                let checking = web_time::Instant::now();
+                let checked = checked(a, b, op, &reply.step);
+                e.check_ms = ms(checking);
+                match checked {
+                    Ok(body) => {
+                        e.outcome = FallbackOutcome::Accepted;
+                        e.result_step = Some(reply.step.into());
+                        record(e);
+                        return Ok(Some(body));
+                    }
+                    Err(why) => {
+                        e.outcome = FallbackOutcome::Refused;
+                        e.reason = Some(why);
+                    }
                 }
             }
         }
-    };
-    let note = event.description();
-    record(event);
-    match result {
-        Some(body) => Ok(Some(body)),
-        None => Err(match error {
-            KernelError::Failed(m) => KernelError::Failed(format!("{m}; {note}")),
-            KernelError::Internal(m) => KernelError::Internal(format!("{m}; {note}")),
-            other => other,
-        }),
+        notes.push(e.description());
+        record(e);
     }
+    if let (Some(saved), Ok(request)) = (saved, &request) {
+        let digest = request_digest(request);
+        if let Some(kept) = saved.get(&digest) {
+            let mut e = event(&kept.provider, &kept.version);
+            e.request = digest;
+            let checking = web_time::Instant::now();
+            let checked = checked(a, b, op, &kept.step);
+            e.check_ms = ms(checking);
+            match checked {
+                Ok(body) => {
+                    e.outcome = FallbackOutcome::Saved;
+                    e.result_step = Some(kept.step.clone());
+                    record(e);
+                    return Ok(Some(body));
+                }
+                Err(why) => {
+                    e.outcome = FallbackOutcome::Refused;
+                    e.reason = Some(format!("the result the design saved no longer passes the checks: {why}"));
+                    notes.push(e.description());
+                    record(e);
+                }
+            }
+        }
+    }
+    if notes.is_empty() {
+        return Err(error);
+    }
+    let note = notes.join("; ");
+    Err(match error {
+        KernelError::Failed(m) => KernelError::Failed(format!("{m}; {note}")),
+        KernelError::Internal(m) => KernelError::Internal(format!("{m}; {note}")),
+        other => other,
+    })
+}
+
+/// [`accept`], with a panic inside it a refusal.
+fn checked(a: &Body, b: &Body, op: BoolOp, step: &str) -> std::result::Result<Body, String> {
+    crate::guard("geometry provider result", || Ok(accept(a, b, op, step))).unwrap_or_else(|e| Err(e.to_string()))
 }
 
 /// One request replayed (`geometry.fallback_replay`): SolidCraft's kernel on the operands it
@@ -360,7 +496,7 @@ pub fn replay(request: &ProviderRequest, provider: Option<&dyn GeometryProvider>
     let kernel = crate::guard("replayed boolean", || crate::boolean(&a, &b, kind));
     let kernel_ms = ms(started);
     let kernel_error = kernel.as_ref().err().map(ToString::to_string);
-    let fallback = provider.and_then(|p| capture_fallbacks(|| fall_back(&a, &b, kind, kernel, kernel_ms, p)).1.into_iter().next());
+    let fallback = provider.and_then(|p| capture_fallbacks(|| fall_back(&a, &b, kind, kernel, kernel_ms, Some(p), None)).1.into_iter().next());
     Ok(Replay { operation: request.operation.label(), kernel_error, kernel_ms, operands_from, fallback })
 }
 
@@ -594,7 +730,7 @@ mod tests {
     fn handed_over(op: BoolOp, provider: &Fixed) -> (Result<Option<Body>>, Vec<FallbackEvent>) {
         let (a, b) = operands();
         let kernel = if op == BoolOp::Cut { failed() } else { Err(KernelError::Failed(format!("boolean {op:?}: no result"))) };
-        capture_fallbacks(|| fall_back(&a, &b, op, kernel, 1.0, provider))
+        capture_fallbacks(|| fall_back(&a, &b, op, kernel, 1.0, Some(provider), None))
     }
 
     #[test]
@@ -627,12 +763,12 @@ mod tests {
         for (tool, op) in [(drill(20.), BoolOp::Cut), (drill(20.), BoolOp::Union), (ball.clone(), BoolOp::Cut), (ball, BoolOp::Union)] {
             let right = crate::boolean(&block, &tool, op).unwrap().unwrap();
             let provider = Fixed::new(Ok(step(&right)));
-            let (r, events) = capture_fallbacks(|| fall_back(&block, &tool, op, failed(), 1.0, provider.as_ref()));
+            let (r, events) = capture_fallbacks(|| fall_back(&block, &tool, op, failed(), 1.0, Some(provider.as_ref()), None));
             assert!(r.is_ok(), "{op:?}: {events:?}");
         }
         let elsewhere = crate::boolean(&block, &drill(12.), BoolOp::Cut).unwrap().unwrap();
         let provider = Fixed::new(Ok(step(&elsewhere)));
-        let (r, events) = capture_fallbacks(|| fall_back(&block, &drill(20.), BoolOp::Cut, failed(), 1.0, provider.as_ref()));
+        let (r, events) = capture_fallbacks(|| fall_back(&block, &drill(20.), BoolOp::Cut, failed(), 1.0, Some(provider.as_ref()), None));
         assert!(r.is_err(), "a hole 8 mm off is not the cut asked for");
         assert_eq!(events[0].outcome, FallbackOutcome::Refused);
     }
@@ -682,12 +818,12 @@ mod tests {
         let large = Err(KernelError::TooLarge("radius".into()));
         for kernel in [ok, invalid, large] {
             let expected = kernel.as_ref().map(|r| r.as_ref().map(Body::face_count)).map_err(Clone::clone);
-            let (r, events) = capture_fallbacks(|| fall_back(&a, &b, BoolOp::Cut, kernel, 1.0, provider.as_ref()));
+            let (r, events) = capture_fallbacks(|| fall_back(&a, &b, BoolOp::Cut, kernel, 1.0, Some(provider.as_ref()), None));
             assert_eq!(r.as_ref().map(|r| r.as_ref().map(Body::face_count)).map_err(Clone::clone), expected);
             assert!(events.is_empty());
         }
         let mesh = crate::mesh_body(&[Vec3::ZERO, Vec3::X, Vec3::Y], &[[0, 1, 2]]).unwrap();
-        let (r, events) = capture_fallbacks(|| fall_back(&a, &mesh, BoolOp::Cut, failed(), 1.0, provider.as_ref()));
+        let (r, events) = capture_fallbacks(|| fall_back(&a, &mesh, BoolOp::Cut, failed(), 1.0, Some(provider.as_ref()), None));
         assert!(r.is_err() && events.is_empty());
         assert_eq!(provider.calls(), 0);
     }
@@ -716,9 +852,9 @@ mod tests {
         let (a, b) = operands();
         let provider = Fixed::new(Err("no".into()));
         let (inner, outer) = capture_fallbacks(|| {
-            let (_, inner) = capture_fallbacks(|| fall_back(&a, &b, BoolOp::Cut, failed(), 0.0, provider.as_ref()));
+            let (_, inner) = capture_fallbacks(|| fall_back(&a, &b, BoolOp::Cut, failed(), 0.0, Some(provider.as_ref()), None));
             for _ in 0..MAX_EVENTS + 4 {
-                let _ = fall_back(&a, &b, BoolOp::Cut, failed(), 0.0, provider.as_ref());
+                let _ = fall_back(&a, &b, BoolOp::Cut, failed(), 0.0, Some(provider.as_ref()), None);
             }
             inner
         });
@@ -746,6 +882,76 @@ mod tests {
         let mut junk = carried;
         junk.operands[1] = "solid".into();
         assert!(replay(&junk, None).unwrap_err().to_string().contains("tool's STEP"));
+    }
+
+    fn saved(a: &Body, b: &Body, op: BoolOp, result: &Body) -> SavedResults {
+        let digest = request_digest(&request(a, b, ProviderOperation::Boolean { kind: op }, false).unwrap());
+        let kept = SavedResult { provider: "fixed".into(), version: "0.9".into(), step: step(result).into() };
+        HashMap::from([(digest, kept)])
+    }
+
+    #[test]
+    fn a_saved_result_answers_when_no_provider_does() {
+        let (a, b) = operands();
+        let right = crate::boolean(&a, &b, BoolOp::Cut).unwrap().unwrap();
+        let store = saved(&a, &b, BoolOp::Cut, &right);
+        // No provider: the saved result, checked, with what it is and where it came from.
+        let (r, events) = capture_fallbacks(|| fall_back(&a, &b, BoolOp::Cut, failed(), 1.0, None, Some(&store)));
+        assert!(r.unwrap().unwrap().history().is_none());
+        let e = &events[0];
+        assert_eq!((e.outcome, e.provider.as_str(), e.provider_version.as_str()), (FallbackOutcome::Saved, "fixed", "0.9"));
+        assert!(e.kept() && e.result_step.is_some() && store.contains_key(&e.request));
+        assert!(warning(&events).is_some_and(|w| w.contains("as saved") && w.contains("needs the fixed geometry provider")), "{events:?}");
+        // A provider that fails first, then the saved result.
+        let failing = Fixed::new(Err("down".into()));
+        let (r, events) = capture_fallbacks(|| fall_back(&a, &b, BoolOp::Cut, failed(), 1.0, Some(failing.as_ref()), Some(&store)));
+        assert!(r.is_ok());
+        assert_eq!(events.iter().map(|e| e.outcome).collect::<Vec<_>>(), [FallbackOutcome::Failed, FallbackOutcome::Saved]);
+        // A provider that answers is kept, and the saved result is not looked at.
+        let answering = Fixed::new(Ok(step(&right)));
+        let (_, events) = capture_fallbacks(|| fall_back(&a, &b, BoolOp::Cut, failed(), 1.0, Some(answering.as_ref()), Some(&store)));
+        assert_eq!(events.iter().map(|e| e.outcome).collect::<Vec<_>>(), [FallbackOutcome::Accepted]);
+        assert_eq!(events[0].result_step.as_deref(), Some(step(&right).as_str()), "a kept result travels with its event, to be saved");
+    }
+
+    #[test]
+    fn a_saved_result_for_other_operands_or_a_wrong_one_is_never_used() {
+        let (a, b) = operands();
+        let right = crate::boolean(&a, &b, BoolOp::Cut).unwrap().unwrap();
+        // The tool moved since: another request, so nothing saved matches and the error is as before.
+        let moved = crate::transform(&b, Vec3::new(1., 0., 0.), Vec3::ZERO, Vec3::Z, 0.0).unwrap();
+        let store = saved(&a, &b, BoolOp::Cut, &right);
+        let (r, events) = capture_fallbacks(|| fall_back(&a, &moved, BoolOp::Cut, failed(), 1.0, None, Some(&store)));
+        assert_eq!(r.unwrap_err().to_string(), failed().unwrap_err().to_string());
+        assert!(events.is_empty());
+        // Saved for these operands, but wrong (the block uncut): refused, never shown.
+        let wrong = saved(&a, &b, BoolOp::Cut, &a);
+        let (r, events) = capture_fallbacks(|| fall_back(&a, &b, BoolOp::Cut, failed(), 1.0, None, Some(&wrong)));
+        assert!(r.unwrap_err().to_string().contains("the result the design saved no longer passes the checks"));
+        assert_eq!(events[0].outcome, FallbackOutcome::Refused);
+        // Offered while nothing fails: the kernel answers alone.
+        let (r, events) = with_saved_results(Some(Arc::new(store)), || capture_fallbacks(|| boolean_with_fallback(&a, &b, BoolOp::Cut)));
+        assert!(r.unwrap().is_some() && events.is_empty());
+        assert!(saved_results().is_none(), "the offer ends with its scope");
+    }
+
+    /// Saved designs key their results by this digest: it must not change between builds.
+    #[test]
+    fn the_request_digest_is_stable() {
+        let request = |kind, b: &str| ProviderRequest {
+            operation: ProviderOperation::Boolean { kind },
+            operands: vec!["A".into(), b.into()],
+            tolerance_mm: 1e-6,
+            native: vec![vec![1, 2, 3]],
+        };
+        let d = request_digest(&request(BoolOp::Cut, "B"));
+        assert_eq!(d, "574a3d5fc85ad901");
+        assert_ne!(request_digest(&request(BoolOp::Union, "B")), d);
+        assert_ne!(request_digest(&request(BoolOp::Cut, "B ")), d);
+        let mut other = request(BoolOp::Cut, "B");
+        other.tolerance_mm = 1.0;
+        other.native.clear();
+        assert_eq!(request_digest(&other), d, "only the operation and the operands count");
     }
 
     #[test]

@@ -245,3 +245,52 @@ fn a_feature_bundle_holds_only_its_own_operations() {
     });
     let _ = std::fs::remove_dir_all(&folder);
 }
+
+/// A design whose join a provider made, opened where there is no provider (the browser): the
+/// result the design saved is shown, measured and exported, the feature says it is the saved one
+/// and that rebuilding it needs the provider, and once its inputs change it fails saying so. In a
+/// plain JSON design and in a container alike.
+#[test]
+fn a_provider_result_travels_with_the_design_to_a_computer_without_the_provider() {
+    let p: Arc<dyn GeometryProvider> = Answer::new(near_answer());
+    let (json_bytes, container, id, made) = with_provider(Some(p), || {
+        let mut s = Session::default();
+        first(&mut s);
+        let id = run(&mut s, "solid.cylinder", crossing())["feature"].as_u64().unwrap();
+        let made = volume(&mut s);
+        let saved = s.design().into_owned();
+        assert_eq!(saved.provider_results.len(), 1);
+        assert_eq!((saved.provider_results[0].feature, saved.provider_results[0].provider.as_str()), (id, "test"));
+        assert!(s.doc.provider_results.is_empty(), "the session's own document is untouched");
+        let container = s.design_container(solidcraft_io::DesignCompression::Fast, false, false).unwrap();
+        (solidcraft_io::write_design(&saved), container, id, made)
+    });
+    with_provider(None, || {
+        for (kind, doc) in
+            [("json", solidcraft_io::read_design(&json_bytes).unwrap()), ("container", solidcraft_io::read_design(&container).unwrap())]
+        {
+            assert_eq!(doc.provider_results.len(), 1, "{kind}");
+            let mut s = Session::new(doc);
+            let r = s.model.result(id).unwrap();
+            assert!(r.error.is_none(), "{kind}: {r:?}");
+            assert!(r.warning.as_ref().is_some_and(|w| w.contains("as saved") && w.contains("needs the test geometry provider")), "{kind}: {r:?}");
+            assert_eq!(r.geometry_fallbacks[0].outcome, FallbackOutcome::Saved);
+            assert!(rel(volume(&mut s), made) < 1e-9, "{kind}: the saved result, measured");
+            let step = run(
+                &mut s,
+                "file.export",
+                json!({"path": std::env::temp_dir().join(format!("solidcraft-saved-result-{kind}-{}.step", std::process::id())).to_string_lossy()}),
+            );
+            assert!(step.is_object(), "{kind}: exported");
+            // Saved again here, it keeps the result it was given.
+            assert_eq!(s.design().provider_results, solidcraft_io::read_design(&json_bytes).unwrap().provider_results, "{kind}");
+            // Its inputs changed: the saved result no longer fits, and the feature says what it needs.
+            let e = s.execute("timeline.edit", &json!({"feature": id, "set": {"height": "6"}})).unwrap_err().to_string();
+            assert!(e.contains("built by the test geometry provider (1), which is not installed here"), "{kind}: {e}");
+        }
+    });
+    // A design no provider ever helped saves exactly as before.
+    let mut s = Session::default();
+    first(&mut s);
+    assert!(!String::from_utf8_lossy(&solidcraft_io::write_design(&s.design())).contains("provider_results"));
+}

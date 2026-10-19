@@ -95,6 +95,12 @@ in the file). It opens designs of every older format and upgrades them as they o
 from a newer version asks you to update instead of being guessed at. Development (nightly) builds
 save a format number no release reads yet.
 
+A feature whose result a [geometry provider](https://github.com/yashas-salankimatt/solidcraft/blob/hybrid/docs/geometry-providers.md)
+made (another kernel, such as OCCT, that SolidCraft asks when its own cannot do an operation)
+saves that result with the design. A computer without the provider, such as the web app, shows,
+measures and exports the saved result, and the feature says that changing what it is built from
+needs the provider.
+
 Sketch patterns retain their live direction-line references and placement settings when saved.
 Older patterns keep their fixed vector directions and original placement defaults.
 

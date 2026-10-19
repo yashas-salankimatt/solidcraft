@@ -1197,11 +1197,16 @@ impl Model {
 
     /// Re-evaluate the document, reusing results up to the first changed feature.
     pub fn evaluate(&mut self, doc: &Document) {
+        // Results providers made, as the design saved them, are offered to its operations.
+        kernel::provider::with_saved_results(crate::provider_results::offered(doc), || self.evaluate_offered(doc));
+    }
+
+    fn evaluate_offered(&mut self, doc: &Document) {
         let (vals, perr) = evaluation_values(doc);
         self.param_errors = perr;
-        // A result evaluated with a geometry provider is never taken for one without it (0, and
-        // so every fingerprint as before, when there is none).
-        let provider = kernel::provider::digest();
+        // A result evaluated with a geometry provider, or with results one saved, is never taken
+        // for one without (0, and so every fingerprint as before, when there is neither).
+        let provider = kernel::provider::digest() ^ crate::provider_results::digest(doc);
         let mut prev_fp = provider;
         let mut state = self.empty.clone();
         let mut out: Vec<FeatureResult> = Vec::with_capacity(doc.features.len());
@@ -1380,7 +1385,13 @@ impl Model {
                     watched.offer(i + 1, doc, &state);
                     None
                 }
-                Err(e) => Some(e.to_string().trim_start_matches("the operation failed: ").to_string()),
+                Err(e) => {
+                    let error = e.to_string().trim_start_matches("the operation failed: ").to_string();
+                    Some(match crate::provider_results::missing_provider_note(doc, f.id) {
+                        Some(note) => format!("{error}; {note}"),
+                        None => error,
+                    })
+                }
             };
             if !self.no_cache
                 && let Ok(mut m) = self.cache.lock()

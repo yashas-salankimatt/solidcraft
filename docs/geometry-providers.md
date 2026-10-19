@@ -124,6 +124,28 @@ version as well as the feature's inputs (a digest of 0, and so every key as befo
 none). A design evaluated with a provider is never shown with that result after the provider is
 gone: it is evaluated again, and the feature fails as it does without one.
 
+## Saved results
+
+A design saves the results a provider made for its features, so a computer without the provider
+(the browser, a machine without OCCT) still shows, measures and exports them:
+
+- Saving (`file.save`, Save As, recovery autosaves) writes `provider_results`: the feature, the
+  provider and its version, the operation, the request's digest (the operands it was made from)
+  and the result as STEP text, a deduplicated blob in a container. Nothing native to a provider
+  is saved. A design no provider helped saves exactly as before.
+- Opening offers them back to the evaluation. When SolidCraft's kernel fails an operation and no
+  provider here gives a result, the saved result for exactly these operands is used, after the
+  same checks a provider's answer gets. A saved result for other operands, or one that fails the
+  checks, is never used.
+- The feature then says so: `outcome: "saved"` in `geometry_fallbacks`, and a warning that it is
+  the result the provider made and the design saved, and that rebuilding it once its inputs change
+  needs that provider. When its inputs have changed, the feature fails and its error names the
+  provider it needs and says it is not installed here.
+- The feature stays parametric: its parameters and inputs are edited as always, and the saved
+  result is only a cache of what the provider made for them.
+- Saved results come with a new design format (`crates/doc/src/format/pending/provider-results.rs`):
+  a release that predates it refuses such a design and asks to be updated, as for any newer design.
+
 ## Replay bundles
 
 A replay bundle holds the operations a feature hands to a provider, so they can be tried again
@@ -162,5 +184,3 @@ where it is asked to and never sends it anywhere.
 - A preference for the provider program in the desktop app (today: the environment only).
 - The OCCT provider program itself, in its own repository.
 - Fillets and chamfers, shell and offset, sweeps and lofts, and import repair, one at a time.
-- Saving a kept result with the design, so a computer without the provider can still show,
-  measure and export it, and says which feature needs the provider to be rebuilt.

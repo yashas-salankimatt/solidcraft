@@ -168,7 +168,19 @@ pub fn write_design_container_with_thumbnail(
         value.as_object_mut().ok_or_else(|| invalid("canvas metadata"))?.insert("image_blob".into(), blob);
         canvases.push(value);
     }
-    let metadata = replace(doc, fields([("features", Value::Array(features)), ("canvases", Value::Array(canvases))])).map_err(invalid)?;
+    let mut replaced = fields([("features", Value::Array(features)), ("canvases", Value::Array(canvases))]);
+    // Saved provider results keep their STEP in blobs; a design without any keeps no key.
+    if !doc.provider_results.is_empty() {
+        let mut results = Vec::with_capacity(doc.provider_results.len());
+        for result in &doc.provider_results {
+            let blob = writer.blob(result.step.as_bytes(), "step", compression == DesignCompression::Compact)?;
+            let mut value = replace(result, fields([("step", Value::String(String::new()))])).map_err(invalid)?;
+            value.as_object_mut().ok_or_else(|| invalid("provider result metadata"))?.insert("step_blob".into(), blob);
+            results.push(value);
+        }
+        replaced.insert("provider_results".into(), Value::Array(results));
+    }
+    let metadata = replace(doc, replaced).map_err(invalid)?;
     let metadata = serde_json::to_vec(&metadata).map_err(invalid)?;
     writer.part("document.json", &metadata, true)?;
     writer.part("container.json", &serde_json::to_vec(&json!({"format": VERSION})).map_err(invalid)?, false)?;
@@ -585,6 +597,13 @@ fn read_document<R: Read + Seek>(reader: &mut PackageReader<R>) -> Result<Docume
             }
             _ => {}
         }
+    }
+    for (index, result) in doc.provider_results.iter_mut().enumerate() {
+        if !result.step.is_empty() {
+            return Err(invalid("ambiguous embedded provider result and blob"));
+        }
+        let value = metadata.get("provider_results").and_then(|v| v.get(index)).ok_or_else(|| invalid("missing provider result metadata"))?;
+        result.step = std::str::from_utf8(reader.blob(value, "step_blob", "step")?).map_err(invalid)?.into();
     }
     for (index, canvas) in doc.canvases.iter_mut().enumerate() {
         if !canvas.data.is_empty() || !matches!(canvas.format.as_str(), "png" | "jpeg") {
