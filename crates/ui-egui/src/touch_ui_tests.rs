@@ -222,6 +222,40 @@ fn in_a_sketch_one_finger_draws_with_the_tool_and_never_turns_the_view() {
 }
 
 #[test]
+fn a_second_finger_takes_back_a_sketch_tools_press() {
+    // A line's press that moved is a click on its release (#2448), and a rectangle's press that
+    // moved placed its first point (#1630): a second finger turns either into navigation instead.
+    for command in ["sketch.line", "sketch.rectangle.two_point"] {
+        let (mut h, rect) = boxed();
+        h.app.run("sketch.create", json!({"plane": "XY"})).unwrap();
+        h.frames(60);
+        h.app.start(command);
+        h.frames(3);
+        let from = rect.center() - vec2(80.0, 50.0);
+        h.input(down(1, from));
+        h.frame();
+        let mut at = from;
+        for _ in 0..4 {
+            at += vec2(12.0, 8.0);
+            h.input(moved(1, at));
+        }
+        let second = rect.center() + vec2(60.0, 40.0);
+        h.input(down(2, second));
+        h.frame();
+        for k in 1..=4 {
+            h.input(moved(2, second + vec2(10.0 * k as f32, 0.0)));
+        }
+        let mut lift = up(2, second + vec2(40.0, 0.0));
+        lift.extend(up(1, at));
+        h.input(lift);
+        h.frames(3);
+        let sketch = h.app.run("sketch.inspect", json!({})).unwrap();
+        assert!(sketch["curves"].as_array().is_some_and(|c| c.is_empty()), "{command}: nothing is drawn: {sketch}");
+        assert!(h.app.tool.as_ref().is_some_and(|t| t.pts.is_empty()), "{command}: no point is placed");
+    }
+}
+
+#[test]
 fn a_long_press_opens_the_context_menu() {
     let (mut h, rect) = boxed();
     let c = rect.center();

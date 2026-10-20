@@ -623,14 +623,16 @@ pub(crate) fn handle(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &e
 }
 
 /// A second finger takes over: what the first had started is let go. A box selection is dropped,
-/// a two-point shape's first point taken back, and a sketch drag undone.
+/// a two-point shape's first point taken back, a tool's click that moved (#2448) forgotten, and a
+/// sketch drag undone.
 fn let_go(app: &mut SolveApp) {
     app.viewport.boxsel = None;
-    if app.viewport.draw_drag {
-        app.viewport.draw_drag = false;
-        if let Some(tool) = app.tool.as_mut() {
-            tool.pts.clear();
-        }
+    app.viewport.tool_click = false;
+    if app.viewport.draw_drag.take().is_some()
+        && let Some(tool) = app.tool.as_mut()
+    {
+        tool.pts.clear();
+        crate::sketch_dims::reset(tool);
     }
     if let Some((_, depth, _)) = app.viewport.point_drag.take() {
         crate::drag_snap::clear();
