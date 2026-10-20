@@ -112,6 +112,7 @@ mod prism_measure;
 pub mod profile;
 pub mod provenance;
 pub mod provider;
+mod provider_blend;
 mod record;
 mod seam_faces;
 mod sew;

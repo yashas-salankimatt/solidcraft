@@ -149,14 +149,16 @@ pub fn write(folder: &str, source: Value, requests: &[ProviderRequest], error: O
         }
         let file = format!("request-{n}.json");
         put(&file, format!("{line}\n").as_bytes())?;
+        // A Boolean's operands are its target and tool; a fillet's or chamfer's one is the body.
+        let roles: &[&str] = if request.operands.len() == 1 { &["body"] } else { &["target", "tool"] };
         let mut steps = Vec::new();
-        for (role, step) in ["target", "tool"].iter().zip(&request.operands) {
+        for (role, step) in roles.iter().zip(&request.operands) {
             let name = format!("request-{n}-{role}.step");
             put(&name, step.as_bytes())?;
             steps.push(name);
         }
         let mut natives = Vec::new();
-        for (role, bytes) in ["target", "tool"].iter().zip(&request.native) {
+        for (role, bytes) in roles.iter().zip(&request.native) {
             let name = format!("request-{n}-{role}.scbrep");
             put(&name, bytes)?;
             natives.push(name);

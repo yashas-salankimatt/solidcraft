@@ -407,7 +407,9 @@ fn fillet_fitted(
     r: f64,
     fit: crate::FilletFit,
 ) -> std::result::Result<(kernel::Body, Option<Vec<f64>>), kernel::KernelError> {
-    match kernel::fillet(body, edges, r) {
+    // A geometry failure goes to a provider, if there is one; a radius too large is the kernel's
+    // answer, for the fit to reduce or taper.
+    match kernel::provider::fillet_with_fallback(body, edges, r) {
         Err(kernel::KernelError::TooLarge(why)) if fit == crate::FilletFit::Reduce => match kernel::fillet_max_each(body, edges, r) {
             // Built at the radius asked for after all (the groups apart): nothing reduced.
             Some((used, b)) => Ok((b, used.iter().any(|u| *u < r).then_some(used))),
@@ -4820,7 +4822,7 @@ fn chamfer_with(
     };
     Ok(match side {
         Some(s) => kernel::chamfer_sides(b, edges, d, s, flip)?,
-        None => kernel::chamfer(b, edges, d)?,
+        None => kernel::provider::chamfer_with_fallback(b, edges, d)?,
     })
 }
 

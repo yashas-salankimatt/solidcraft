@@ -42,8 +42,9 @@ pub struct ProviderResult {
     pub operation: String,
     /// The design up to and including the feature when the result was made ([`intent`]).
     pub intent: String,
-    /// What the operation's two operands were like.
-    pub operands: [OperandPrint; 2],
+    /// What the operation's operands were like, in order (two for a Boolean, one for a fillet or
+    /// chamfer). Saved as a list, so a design saved before blends were handed over reads the same.
+    pub operands: Vec<OperandPrint>,
     /// The result, as STEP text (a deduplicated blob in a container).
     pub step: Arc<str>,
 }
@@ -89,7 +90,8 @@ pub fn offered_for(doc: &Document, index: usize, id: u64) -> Option<Arc<SavedRes
     let now = intent(doc, index);
     let mut bytes = 0usize;
     let mut out = SavedResults::new();
-    for r in doc.provider_results.iter().take(MAX_RESULTS).filter(|r| r.feature == id && r.intent == now) {
+    // An operation has one or two operands: a saved result with more is from a hostile file.
+    for r in doc.provider_results.iter().take(MAX_RESULTS).filter(|r| r.feature == id && r.intent == now && (1..=2).contains(&r.operands.len())) {
         if !(plain(&r.provider) && plain(&r.version) && plain(&r.operation) && !r.step.is_empty()) {
             continue;
         }
@@ -101,7 +103,7 @@ pub fn offered_for(doc: &Document, index: usize, id: u64) -> Option<Arc<SavedRes
             provider: r.provider.clone(),
             version: r.version.clone(),
             operation: r.operation.clone(),
-            operands: r.operands,
+            operands: r.operands.clone(),
             step: r.step.clone(),
         });
     }
@@ -131,7 +133,8 @@ pub fn to_save(doc: &Document, model: &Model) -> Vec<ProviderResult> {
     let evaluated: BTreeSet<u64> = model.results.iter().filter(|r| !r.skipped).map(|r| r.id).collect();
     for r in model.results.iter().filter(|r| !r.skipped) {
         let Some(&i) = index.get(&r.id) else { continue };
-        let kept: Vec<_> = r.geometry_fallbacks.iter().filter(|e| e.kept()).filter_map(|e| Some((e, e.result_step.clone()?, e.operands?))).collect();
+        let kept: Vec<_> =
+            r.geometry_fallbacks.iter().filter(|e| e.kept()).filter_map(|e| Some((e, e.result_step.clone()?, e.operands.clone()?))).collect();
         if kept.is_empty() {
             continue;
         }
