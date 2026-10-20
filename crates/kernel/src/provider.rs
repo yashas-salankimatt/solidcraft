@@ -1,15 +1,16 @@
 //! Alternate geometry providers (`docs/geometry-providers.md`): another kernel an operation
-//! may hand over to when SolidCraft's own fails with a geometry error. Today that is a
-//! Boolean of two solids.
+//! may hand over to when SolidCraft's own fails with a geometry error: a Boolean of two solids,
+//! a constant-radius fillet or an equal-distance chamfer of a solid's edges.
 //!
 //! A provider is only a trait here, taking and returning STEP text, so nothing of it is linked
 //! into this crate: the engine runs it as a separate program, and the browser build has none.
 //! With no provider installed every operation is exactly what it was.
 //!
 //! The kernel's own result always comes first. A provider's result is kept only once it passes
-//! checks that do not rely on the kernel that just failed (`check`): one closed, sound solid
-//! whose volume a join, cut or intersection of these operands can have, nothing changed away
-//! from the tool, and its surface where the operands' surfaces say it must be. Every attempt is
+//! checks that do not rely on the kernel that just failed (`check`, `blend_check`): one closed,
+//! sound solid whose volume a join, cut or intersection of these operands can have, nothing
+//! changed away from the tool (or the blended edges), and its surface where the operands' surfaces
+//! say it must be. Every attempt is
 //! recorded ([`FallbackEvent`]), so a result a provider made is never passed off as the
 //! kernel's. Its faces carry no history: they are named from geometry (unverified).
 //!
@@ -48,18 +49,38 @@ pub trait GeometryProvider: Send + Sync {
     fn wants_native_operands(&self) -> bool {
         false
     }
+    /// Whether it does `operation` ([`ProviderOperation::name`]): one it doesn't is never handed
+    /// to it, so the operation fails as it does without a provider.
+    fn does(&self, operation: &str) -> bool {
+        let _ = operation;
+        true
+    }
 }
 
 /// An operation a provider is asked to do.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ProviderOperation {
     /// A Boolean of the two operands: the first is the target, the second the tool.
     Boolean { kind: BoolOp },
+    /// A round of `radius` on the one operand's edges, each given by a point on it (mm).
+    Fillet { radius: f64, edges: Vec<[f64; 3]> },
+    /// A chamfer `distance` back along both faces of the one operand's edges, each given by a
+    /// point on it (mm).
+    Chamfer { distance: f64, edges: Vec<[f64; 3]> },
 }
 
 impl ProviderOperation {
-    /// The operation in words (`boolean cut`).
+    /// The operation's name on the wire, as a provider lists the ones it does (`boolean`).
+    pub fn name(&self) -> &'static str {
+        match self {
+            ProviderOperation::Boolean { .. } => "boolean",
+            ProviderOperation::Fillet { .. } => "fillet",
+            ProviderOperation::Chamfer { .. } => "chamfer",
+        }
+    }
+
+    /// The operation in words (`boolean cut`, `fillet`).
     pub fn label(&self) -> String {
         match self {
             ProviderOperation::Boolean { kind } => {
@@ -70,7 +91,22 @@ impl ProviderOperation {
                 };
                 format!("boolean {kind}")
             }
+            other => other.name().to_string(),
         }
+    }
+
+    /// How many operands it takes.
+    fn arity(&self) -> usize {
+        match self {
+            ProviderOperation::Boolean { .. } => 2,
+            ProviderOperation::Fillet { .. } | ProviderOperation::Chamfer { .. } => 1,
+        }
+    }
+
+    /// The refusal of a request with `n` operands when it takes another number.
+    fn wrong_operands(&self, n: usize) -> KernelError {
+        let takes = if self.arity() == 2 { "two operands" } else { "one operand" };
+        KernelError::Invalid(format!("a {} takes {takes}; the request has {n}", self.label()))
     }
 }
 
@@ -183,7 +219,7 @@ pub struct FallbackEvent {
     #[serde(skip)]
     pub result_step: Option<Arc<str>>,
     #[serde(skip)]
-    pub operands: Option<[OperandPrint; 2]>,
+    pub operands: Option<Vec<OperandPrint>>,
 }
 
 /// The kernel's first reason in an error (`boolean Union: no result`): the whole of it, every
@@ -335,8 +371,8 @@ pub struct SavedResult {
     pub version: String,
     /// The operation (`boolean cut`).
     pub operation: String,
-    /// What its operands were like.
-    pub operands: [OperandPrint; 2],
+    /// What its operands were like, in order.
+    pub operands: Vec<OperandPrint>,
     /// The result as STEP text.
     pub step: Arc<str>,
 }
@@ -378,20 +414,47 @@ pub fn boolean_with_fallback(a: &Body, b: &Body, op: BoolOp) -> Result<Option<Bo
     crate::profile::timed(crate::profile::Kind::Boolean, || {
         let started = web_time::Instant::now();
         let kernel = crate::boolean(a, b, op);
-        fall_back(a, b, op, kernel, ms(started), provider.as_deref(), saved.as_deref())
+        fall_back(&ProviderOperation::Boolean { kind: op }, &[a, b], kernel, ms(started), provider.as_deref(), saved.as_deref())
     })
+}
+
+/// [`crate::fillet`], handed over or answered from a saved result as [`boolean_with_fallback`]
+/// is. Only a geometry failure is: a radius too large for the faces around the edges
+/// ([`KernelError::TooLarge`]) is the kernel's answer, so a fillet's fit can reduce or taper it.
+pub fn fillet_with_fallback(body: &Body, edges: &[Vec3], radius: f64) -> Result<Body> {
+    blend_with_fallback(body, ProviderOperation::Fillet { radius, edges: points(edges) }, || crate::fillet(body, edges, radius))
+}
+
+/// [`crate::chamfer`] (equal distances), handed over as [`fillet_with_fallback`] is.
+pub fn chamfer_with_fallback(body: &Body, edges: &[Vec3], distance: f64) -> Result<Body> {
+    blend_with_fallback(body, ProviderOperation::Chamfer { distance, edges: points(edges) }, || crate::chamfer(body, edges, distance))
+}
+
+fn points(edges: &[Vec3]) -> Vec<[f64; 3]> {
+    edges.iter().map(|p| [p.x, p.y, p.z]).collect()
+}
+
+fn blend_with_fallback(body: &Body, operation: ProviderOperation, kernel: impl FnOnce() -> Result<Body>) -> Result<Body> {
+    let (provider, saved) = (current(), saved_results());
+    if provider.is_none() && saved.is_none() {
+        return kernel();
+    }
+    let started = web_time::Instant::now();
+    let kernel = kernel().map(Some);
+    fall_back(&operation, &[body], kernel, ms(started), provider.as_deref(), saved.as_deref())?
+        .ok_or_else(|| KernelError::Failed(format!("the {} left nothing", operation.label())))
 }
 
 fn ms(since: web_time::Instant) -> f64 {
     since.elapsed().as_secs_f64() * 1000.0
 }
 
-/// The kernel's result of a Boolean, or, when the kernel failed with a geometry error, `provider`'s
-/// or the one `saved` holds for these operands, whichever comes first and passes the checks.
+/// The kernel's result of `operation` on `operands`, or, when the kernel failed with a geometry
+/// error, `provider`'s or the one `saved` holds for these operands, whichever comes first and
+/// passes the checks.
 fn fall_back(
-    a: &Body,
-    b: &Body,
-    op: BoolOp,
+    operation: &ProviderOperation,
+    operands: &[&Body],
     kernel: Result<Option<Body>>,
     kernel_ms: f64,
     provider: Option<&dyn GeometryProvider>,
@@ -399,10 +462,13 @@ fn fall_back(
 ) -> Result<Option<Body>> {
     // Bad input (a mesh, a refused shape) is no geometry failure, and a provider gets solids only.
     let error = match kernel {
-        Err(e @ (KernelError::Failed(_) | KernelError::Internal(_))) if !a.is_mesh() && !b.is_mesh() => e,
+        Err(e @ (KernelError::Failed(_) | KernelError::Internal(_)))
+            if operands.iter().all(|x| !x.is_mesh()) && operands.len() == operation.arity() =>
+        {
+            e
+        }
         other => return other,
     };
-    let operation = ProviderOperation::Boolean { kind: op };
     let event = |provider: &str, version: &str| FallbackEvent {
         operation: operation.label(),
         kernel_error: error.to_string(),
@@ -416,24 +482,25 @@ fn fall_back(
         result_step: None,
         operands: None,
     };
+    let prints = || operands.iter().map(|x| OperandPrint::of(x)).collect::<Option<Vec<_>>>();
     let mut notes = Vec::new();
-    if let Some(provider) = provider {
+    if let Some(provider) = provider.filter(|p| p.does(operation.name())) {
         let mut e = event(provider.id(), provider.version());
         let asked = web_time::Instant::now();
-        let reply = request(a, b, operation, provider.wants_native_operands())
+        let reply = request(operands, operation.clone(), provider.wants_native_operands())
             .and_then(|request| crate::guard("geometry provider", || provider.run(&request).map_err(KernelError::Failed)));
         e.provider_ms = ms(asked);
         match reply {
             Err(why) => e.reason = Some(why.to_string().trim_start_matches("the operation failed: ").to_string()),
             Ok(reply) => {
                 let checking = web_time::Instant::now();
-                let checked = checked(a, b, op, &reply.step);
+                let checked = checked(operation, operands, &reply.step);
                 e.check_ms = ms(checking);
                 match checked {
                     Ok(body) => {
                         e.outcome = FallbackOutcome::Accepted;
                         e.result_step = Some(reply.step.into());
-                        e.operands = OperandPrint::of(a).zip(OperandPrint::of(b)).map(|(pa, pb)| [pa, pb]);
+                        e.operands = prints();
                         record(e);
                         return Ok(Some(body));
                     }
@@ -448,19 +515,20 @@ fn fall_back(
         record(e);
     }
     let label = operation.label();
-    let prints = saved.filter(|saved| saved.iter().any(|k| k.operation == label)).and_then(|_| OperandPrint::of(a).zip(OperandPrint::of(b)));
-    if let (Some(saved), Some((pa, pb))) = (saved, prints)
-        && let Some(kept) = saved.iter().find(|k| k.operation == label && k.operands[0].fits(&pa) && k.operands[1].fits(&pb))
+    let prints = saved.filter(|saved| saved.iter().any(|k| k.operation == label)).and_then(|_| prints());
+    let fits = |k: &SavedResult, prints: &[OperandPrint]| k.operands.len() == prints.len() && k.operands.iter().zip(prints).all(|(k, p)| k.fits(p));
+    if let (Some(saved), Some(prints)) = (saved, prints)
+        && let Some(kept) = saved.iter().find(|k| k.operation == label && fits(k, &prints))
     {
         let mut e = event(&kept.provider, &kept.version);
         let checking = web_time::Instant::now();
-        let checked = checked(a, b, op, &kept.step);
+        let checked = checked(operation, operands, &kept.step);
         e.check_ms = ms(checking);
         match checked {
             Ok(body) => {
                 e.outcome = FallbackOutcome::Saved;
                 e.result_step = Some(kept.step.clone());
-                e.operands = Some([pa, pb]);
+                e.operands = Some(prints);
                 record(e);
                 return Ok(Some(body));
             }
@@ -484,8 +552,8 @@ fn fall_back(
 }
 
 /// [`accept`], with a panic inside it a refusal.
-fn checked(a: &Body, b: &Body, op: BoolOp, step: &str) -> std::result::Result<Body, String> {
-    crate::guard("geometry provider result", || Ok(accept(a, b, op, step))).unwrap_or_else(|e| Err(e.to_string()))
+fn checked(operation: &ProviderOperation, operands: &[&Body], step: &str) -> std::result::Result<Body, String> {
+    crate::guard("geometry provider result", || Ok(accept(operation, operands, step))).unwrap_or_else(|e| Err(e.to_string()))
 }
 
 /// One request replayed (`geometry.fallback_replay`): SolidCraft's kernel on the operands it
@@ -511,50 +579,65 @@ pub struct Replay {
 /// read back from their STEP text, which can differ from the bodies it was written from by the fit
 /// of their intersection curves: the kernel may then do what it could not do on the originals.
 pub fn replay(request: &ProviderRequest, provider: Option<&dyn GeometryProvider>) -> Result<Replay> {
-    let ProviderOperation::Boolean { kind } = request.operation;
-    let ([a, b], operands_from) = match request.native.as_slice() {
-        [na, nb] => ([crate::decode_native_body(na)?, crate::decode_native_body(nb)?], "native"),
-        _ => (operands(request)?, "step"),
+    let (bodies, operands_from) = if request.native.len() == request.operation.arity() {
+        (request.native.iter().map(|n| crate::decode_native_body(n)).collect::<Result<Vec<_>>>()?, "native")
+    } else {
+        (operands(request)?, "step")
     };
+    let refs: Vec<&Body> = bodies.iter().collect();
     let started = web_time::Instant::now();
-    let kernel = crate::guard("replayed boolean", || crate::boolean(&a, &b, kind));
+    let kernel = crate::guard("replayed operation", || run_kernel(&request.operation, &refs));
     let kernel_ms = ms(started);
     let kernel_error = kernel.as_ref().err().map(ToString::to_string);
-    let fallback = provider.and_then(|p| capture_fallbacks(|| fall_back(&a, &b, kind, kernel, kernel_ms, Some(p), None)).1.into_iter().next());
+    let fallback =
+        provider.and_then(|p| capture_fallbacks(|| fall_back(&request.operation, &refs, kernel, kernel_ms, Some(p), None)).1.into_iter().next());
     Ok(Replay { operation: request.operation.label(), kernel_error, kernel_ms, operands_from, fallback })
 }
 
-/// The bodies a Boolean request's operands hold.
-fn operands(request: &ProviderRequest) -> Result<[Body; 2]> {
-    let [a, b] = request.operands.as_slice() else {
-        return Err(KernelError::Invalid(format!("a Boolean takes two operands; the request has {}", request.operands.len())));
-    };
+/// SolidCraft's kernel doing `operation` on `operands`.
+fn run_kernel(operation: &ProviderOperation, operands: &[&Body]) -> Result<Option<Body>> {
+    let vec = |edges: &[[f64; 3]]| edges.iter().map(|p| Vec3::new(p[0], p[1], p[2])).collect::<Vec<_>>();
+    match (operation, operands) {
+        (ProviderOperation::Boolean { kind }, [a, b]) => crate::boolean(a, b, *kind),
+        (ProviderOperation::Fillet { radius, edges }, [body]) => crate::fillet(body, &vec(edges), *radius).map(Some),
+        (ProviderOperation::Chamfer { distance, edges }, [body]) => crate::chamfer(body, &vec(edges), *distance).map(Some),
+        _ => Err(operation.wrong_operands(operands.len())),
+    }
+}
+
+/// The bodies a request's operands hold.
+fn operands(request: &ProviderRequest) -> Result<Vec<Body>> {
+    let arity = request.operation.arity();
+    if request.operands.len() != arity {
+        return Err(request.operation.wrong_operands(request.operands.len()));
+    }
+    let names: &[&str] = if arity == 2 { &["target", "tool"] } else { &["body"] };
     let body = |step: &str, which: &str| -> Result<Body> {
         let import = crate::step_import(step).map_err(|e| KernelError::Invalid(format!("the {which}'s STEP could not be read: {e}")))?;
         crate::ops::join_pieces(import.bodies.into_iter().map(|piece| piece.body).collect())?
             .ok_or_else(|| KernelError::Invalid(format!("the {which} has no solid")))
     };
-    Ok([body(a, "target")?, body(b, "tool")?])
+    request.operands.iter().zip(names).map(|(step, which)| body(step, which)).collect()
 }
 
-/// The request for `operation` on `a` and `b` (with their native encoding when `native`).
-fn request(a: &Body, b: &Body, operation: ProviderOperation, native: bool) -> Result<ProviderRequest> {
+/// The request for `operation` on `operands` (with their native encoding when `native`).
+fn request(operands: &[&Body], operation: ProviderOperation, native: bool) -> Result<ProviderRequest> {
     let step = |body: &Body| {
         crate::step_export_bodies(&[crate::ExportBody { name: "Operand".into(), body, color: None }], &crate::StepHeader::default())
             .map_err(|e| KernelError::Failed(format!("the operands could not be written as STEP: {e}")))
     };
-    let tolerance_mm = (a.size().max(b.size()) * 1e-7).max(1e-7);
+    let tolerance_mm = (operands.iter().map(|x| x.size()).fold(0.0, f64::max) * 1e-7).max(1e-7);
     // A body the native encoding refuses is replayed from its STEP instead.
     let native =
-        if native { [a, b].iter().map(|x| crate::encode_native_body(x)).collect::<Result<Vec<_>>>().unwrap_or_default() } else { Vec::new() };
-    Ok(ProviderRequest { operation, operands: vec![step(a)?, step(b)?], tolerance_mm, native })
+        if native { operands.iter().map(|x| crate::encode_native_body(x)).collect::<Result<Vec<_>>>().unwrap_or_default() } else { Vec::new() };
+    Ok(ProviderRequest { operation, operands: operands.iter().map(|x| step(x)).collect::<Result<_>>()?, tolerance_mm, native })
 }
 
 /// Most pieces a provider's result may have.
 const MAX_PIECES: usize = 4096;
 
 /// The provider's result as a body, if it passes the checks; else why not.
-fn accept(a: &Body, b: &Body, op: BoolOp, step: &str) -> std::result::Result<Body, String> {
+fn accept(operation: &ProviderOperation, operands: &[&Body], step: &str) -> std::result::Result<Body, String> {
     let import = crate::step_import(step).map_err(|e| format!("its STEP could not be read: {e}"))?;
     if import.bodies.len() > MAX_PIECES {
         return Err(format!("it has {} pieces (at most {MAX_PIECES})", import.bodies.len()));
@@ -568,7 +651,13 @@ fn accept(a: &Body, b: &Body, op: BoolOp, step: &str) -> std::result::Result<Bod
     if !problems.is_empty() {
         return Err(format!("it is not a sound solid: {}", problems.join("; ")));
     }
-    check(a, b, op, &body)?;
+    match (operation, operands) {
+        (ProviderOperation::Boolean { kind }, [a, b]) => check(a, b, *kind, &body)?,
+        (ProviderOperation::Fillet { radius: size, edges } | ProviderOperation::Chamfer { distance: size, edges }, [input]) => {
+            crate::provider_blend::blend_check(input, edges, *size, &body)?
+        }
+        _ => return Err("it was asked for with the wrong number of operands".into()),
+    }
     Ok(body)
 }
 
@@ -585,7 +674,7 @@ fn check(a: &Body, b: &Body, op: BoolOp, r: &Body) -> std::result::Result<(), St
 }
 
 /// The chord tolerance the checks mesh the bodies with.
-fn check_tolerance(a: &Body, b: &Body) -> f64 {
+pub(crate) fn check_tolerance(a: &Body, b: &Body) -> f64 {
     (a.size().max(b.size()) * 2e-4).max(1e-5)
 }
 
@@ -621,7 +710,7 @@ const SURFACE_SAMPLES: usize = 2000;
 /// Points spread over a mesh by area, so a flat face of two triangles is sampled as densely as
 /// a round one of hundreds: a triangle owed `n` points gives the centres of the `m × m ≤ n`
 /// triangles it divides into, and what a small one is owed carries over to the next.
-fn samples(mesh: &Mesh) -> Vec<Vec3> {
+pub(crate) fn samples(mesh: &Mesh) -> Vec<Vec3> {
     let triangles: Vec<[Vec3; 3]> = mesh.triangles.iter().filter_map(|t| mesh.tri(t)).collect();
     let area = |[a, b, c]: &[Vec3; 3]| (*b - *a).cross(*c - *a).len() * 0.5;
     let total: f64 = triangles.iter().map(area).sum();
@@ -728,7 +817,7 @@ mod tests {
         }
         fn run(&self, request: &ProviderRequest) -> std::result::Result<ProviderReply, String> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            assert_eq!(request.operands.len(), 2);
+            assert_eq!(request.operands.len(), request.operation.arity());
             assert!(request.operands.iter().all(|s| s.starts_with("ISO-10303-21;")));
             self.reply.clone().map(|step| ProviderReply { step })
         }
@@ -754,7 +843,7 @@ mod tests {
     fn handed_over(op: BoolOp, provider: &Fixed) -> (Result<Option<Body>>, Vec<FallbackEvent>) {
         let (a, b) = operands();
         let kernel = if op == BoolOp::Cut { failed() } else { Err(KernelError::Failed(format!("boolean {op:?}: no result"))) };
-        capture_fallbacks(|| fall_back(&a, &b, op, kernel, 1.0, Some(provider), None))
+        capture_fallbacks(|| fall_back(&ProviderOperation::Boolean { kind: op }, &[&a, &b], kernel, 1.0, Some(provider), None))
     }
 
     #[test]
@@ -787,12 +876,16 @@ mod tests {
         for (tool, op) in [(drill(20.), BoolOp::Cut), (drill(20.), BoolOp::Union), (ball.clone(), BoolOp::Cut), (ball, BoolOp::Union)] {
             let right = crate::boolean(&block, &tool, op).unwrap().unwrap();
             let provider = Fixed::new(Ok(step(&right)));
-            let (r, events) = capture_fallbacks(|| fall_back(&block, &tool, op, failed(), 1.0, Some(provider.as_ref()), None));
+            let (r, events) = capture_fallbacks(|| {
+                fall_back(&ProviderOperation::Boolean { kind: op }, &[&block, &tool], failed(), 1.0, Some(provider.as_ref()), None)
+            });
             assert!(r.is_ok(), "{op:?}: {events:?}");
         }
         let elsewhere = crate::boolean(&block, &drill(12.), BoolOp::Cut).unwrap().unwrap();
         let provider = Fixed::new(Ok(step(&elsewhere)));
-        let (r, events) = capture_fallbacks(|| fall_back(&block, &drill(20.), BoolOp::Cut, failed(), 1.0, Some(provider.as_ref()), None));
+        let (r, events) = capture_fallbacks(|| {
+            fall_back(&ProviderOperation::Boolean { kind: BoolOp::Cut }, &[&block, &drill(20.)], failed(), 1.0, Some(provider.as_ref()), None)
+        });
         assert!(r.is_err(), "a hole 8 mm off is not the cut asked for");
         assert_eq!(events[0].outcome, FallbackOutcome::Refused);
     }
@@ -842,12 +935,16 @@ mod tests {
         let large = Err(KernelError::TooLarge("radius".into()));
         for kernel in [ok, invalid, large] {
             let expected = kernel.as_ref().map(|r| r.as_ref().map(Body::face_count)).map_err(Clone::clone);
-            let (r, events) = capture_fallbacks(|| fall_back(&a, &b, BoolOp::Cut, kernel, 1.0, Some(provider.as_ref()), None));
+            let (r, events) = capture_fallbacks(|| {
+                fall_back(&ProviderOperation::Boolean { kind: BoolOp::Cut }, &[&a, &b], kernel, 1.0, Some(provider.as_ref()), None)
+            });
             assert_eq!(r.as_ref().map(|r| r.as_ref().map(Body::face_count)).map_err(Clone::clone), expected);
             assert!(events.is_empty());
         }
         let mesh = crate::mesh_body(&[Vec3::ZERO, Vec3::X, Vec3::Y], &[[0, 1, 2]]).unwrap();
-        let (r, events) = capture_fallbacks(|| fall_back(&a, &mesh, BoolOp::Cut, failed(), 1.0, Some(provider.as_ref()), None));
+        let (r, events) = capture_fallbacks(|| {
+            fall_back(&ProviderOperation::Boolean { kind: BoolOp::Cut }, &[&a, &mesh], failed(), 1.0, Some(provider.as_ref()), None)
+        });
         assert!(r.is_err() && events.is_empty());
         assert_eq!(provider.calls(), 0);
     }
@@ -876,9 +973,11 @@ mod tests {
         let (a, b) = operands();
         let provider = Fixed::new(Err("no".into()));
         let (inner, outer) = capture_fallbacks(|| {
-            let (_, inner) = capture_fallbacks(|| fall_back(&a, &b, BoolOp::Cut, failed(), 0.0, Some(provider.as_ref()), None));
+            let (_, inner) = capture_fallbacks(|| {
+                fall_back(&ProviderOperation::Boolean { kind: BoolOp::Cut }, &[&a, &b], failed(), 0.0, Some(provider.as_ref()), None)
+            });
             for _ in 0..MAX_EVENTS + 4 {
-                let _ = fall_back(&a, &b, BoolOp::Cut, failed(), 0.0, Some(provider.as_ref()), None);
+                let _ = fall_back(&ProviderOperation::Boolean { kind: BoolOp::Cut }, &[&a, &b], failed(), 0.0, Some(provider.as_ref()), None);
             }
             inner
         });
@@ -890,7 +989,7 @@ mod tests {
     #[test]
     fn a_request_replays_from_its_operands() {
         let (a, b) = operands();
-        let asked = request(&a, &b, ProviderOperation::Boolean { kind: BoolOp::Cut }, true).unwrap();
+        let asked = request(&[&a, &b], ProviderOperation::Boolean { kind: BoolOp::Cut }, true).unwrap();
         assert_eq!(asked.native.len(), 2);
         assert_eq!(replay(&asked, None).unwrap().operands_from, "native");
         // As a bundle carries it: through its JSON.
@@ -911,7 +1010,7 @@ mod tests {
     fn saved(a: &Body, b: &Body, op: BoolOp, result: &Body) -> SavedResults {
         let operands = [OperandPrint::of(a).unwrap(), OperandPrint::of(b).unwrap()];
         let operation = ProviderOperation::Boolean { kind: op }.label();
-        vec![SavedResult { provider: "fixed".into(), version: "0.9".into(), operation, operands, step: step(result).into() }]
+        vec![SavedResult { provider: "fixed".into(), version: "0.9".into(), operation, operands: operands.to_vec(), step: step(result).into() }]
     }
 
     #[test]
@@ -920,20 +1019,25 @@ mod tests {
         let right = crate::boolean(&a, &b, BoolOp::Cut).unwrap().unwrap();
         let store = saved(&a, &b, BoolOp::Cut, &right);
         // No provider: the saved result, checked, with what it is and where it came from.
-        let (r, events) = capture_fallbacks(|| fall_back(&a, &b, BoolOp::Cut, failed(), 1.0, None, Some(&store)));
+        let (r, events) =
+            capture_fallbacks(|| fall_back(&ProviderOperation::Boolean { kind: BoolOp::Cut }, &[&a, &b], failed(), 1.0, None, Some(&store)));
         assert!(r.unwrap().unwrap().history().is_none());
         let e = &events[0];
         assert_eq!((e.outcome, e.provider.as_str(), e.provider_version.as_str()), (FallbackOutcome::Saved, "fixed", "0.9"));
-        assert!(e.kept() && e.result_step.is_some() && e.operands == Some(store[0].operands));
+        assert!(e.kept() && e.result_step.is_some() && e.operands == Some(store[0].operands.clone()));
         assert!(warning(&events).is_some_and(|w| w.contains("as saved") && w.contains("needs the fixed geometry provider")), "{events:?}");
         // A provider that fails first, then the saved result.
         let failing = Fixed::new(Err("down".into()));
-        let (r, events) = capture_fallbacks(|| fall_back(&a, &b, BoolOp::Cut, failed(), 1.0, Some(failing.as_ref()), Some(&store)));
+        let (r, events) = capture_fallbacks(|| {
+            fall_back(&ProviderOperation::Boolean { kind: BoolOp::Cut }, &[&a, &b], failed(), 1.0, Some(failing.as_ref()), Some(&store))
+        });
         assert!(r.is_ok());
         assert_eq!(events.iter().map(|e| e.outcome).collect::<Vec<_>>(), [FallbackOutcome::Failed, FallbackOutcome::Saved]);
         // A provider that answers is kept, and the saved result is not looked at.
         let answering = Fixed::new(Ok(step(&right)));
-        let (_, events) = capture_fallbacks(|| fall_back(&a, &b, BoolOp::Cut, failed(), 1.0, Some(answering.as_ref()), Some(&store)));
+        let (_, events) = capture_fallbacks(|| {
+            fall_back(&ProviderOperation::Boolean { kind: BoolOp::Cut }, &[&a, &b], failed(), 1.0, Some(answering.as_ref()), Some(&store))
+        });
         assert_eq!(events.iter().map(|e| e.outcome).collect::<Vec<_>>(), [FallbackOutcome::Accepted]);
         assert_eq!(events[0].result_step.as_deref(), Some(step(&right).as_str()), "a kept result travels with its event, to be saved");
     }
@@ -945,12 +1049,14 @@ mod tests {
         // The tool moved since: another request, so nothing saved matches and the error is as before.
         let moved = crate::transform(&b, Vec3::new(1., 0., 0.), Vec3::ZERO, Vec3::Z, 0.0).unwrap();
         let store = saved(&a, &b, BoolOp::Cut, &right);
-        let (r, events) = capture_fallbacks(|| fall_back(&a, &moved, BoolOp::Cut, failed(), 1.0, None, Some(&store)));
+        let (r, events) =
+            capture_fallbacks(|| fall_back(&ProviderOperation::Boolean { kind: BoolOp::Cut }, &[&a, &moved], failed(), 1.0, None, Some(&store)));
         assert_eq!(r.unwrap_err().to_string(), failed().unwrap_err().to_string());
         assert!(events.is_empty());
         // Saved for these operands, but wrong (the block uncut): refused, never shown.
         let wrong = saved(&a, &b, BoolOp::Cut, &a);
-        let (r, events) = capture_fallbacks(|| fall_back(&a, &b, BoolOp::Cut, failed(), 1.0, None, Some(&wrong)));
+        let (r, events) =
+            capture_fallbacks(|| fall_back(&ProviderOperation::Boolean { kind: BoolOp::Cut }, &[&a, &b], failed(), 1.0, None, Some(&wrong)));
         assert!(r.unwrap_err().to_string().contains("the result the design saved no longer passes the checks"));
         assert_eq!(events[0].outcome, FallbackOutcome::Refused);
         // Offered while nothing fails: the kernel answers alone.
@@ -989,5 +1095,151 @@ mod tests {
         assert_eq!(json, serde_json::json!({"op": "boolean", "kind": "cut", "operands": ["A", "B"], "tolerance_mm": 1e-6}));
         assert_eq!(serde_json::from_value::<ProviderRequest>(json).unwrap(), request);
         assert_eq!(request.operation.label(), "boolean cut");
+    }
+
+    /// A block, an edge of it (a point on the top front edge) and the blends of it.
+    fn blend_case() -> (Body, Vec3) {
+        (cube(Vec3::ZERO, Vec3::new(40., 30., 20.)), Vec3::new(20., 0., 20.))
+    }
+
+    fn blend_failed() -> Result<Option<Body>> {
+        Err(KernelError::Failed("not supported yet: a vertex of the edge chain where other faces meet".into()))
+    }
+
+    fn blended(operation: &ProviderOperation, body: &Body, provider: &dyn GeometryProvider) -> (Result<Option<Body>>, Vec<FallbackEvent>) {
+        capture_fallbacks(|| fall_back(operation, &[body], blend_failed(), 1.0, Some(provider), None))
+    }
+
+    #[test]
+    fn a_right_fillet_or_chamfer_is_kept_and_recorded_with_its_one_operand() {
+        let (block, edge) = blend_case();
+        for (operation, right) in [
+            (ProviderOperation::Fillet { radius: 2.0, edges: vec![[edge.x, edge.y, edge.z]] }, crate::fillet(&block, &[edge], 2.0).unwrap()),
+            (ProviderOperation::Chamfer { distance: 2.0, edges: vec![[edge.x, edge.y, edge.z]] }, crate::chamfer(&block, &[edge], 2.0).unwrap()),
+        ] {
+            let provider = Fixed::new(Ok(step(&right)));
+            let (r, events) = blended(&operation, &block, provider.as_ref());
+            let body = r.unwrap_or_else(|e| panic!("{}: {e}", operation.label())).unwrap();
+            let (got, want) = (crate::measure(&body).unwrap().volume, crate::measure(&right).unwrap().volume);
+            assert!((got - want).abs() < 1e-6 * want, "{}: {got} vs {want}", operation.label());
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].outcome, FallbackOutcome::Accepted, "{events:?}");
+            assert_eq!(events[0].operation, operation.label());
+            assert_eq!(events[0].operands.as_ref().map(Vec::len), Some(1), "one operand's print, for the design to save");
+            assert_eq!(provider.calls(), 1);
+        }
+    }
+
+    #[test]
+    fn a_blend_that_misses_its_edge_or_changes_the_body_elsewhere_is_refused() {
+        let (block, edge) = blend_case();
+        let fillet = ProviderOperation::Fillet { radius: 2.0, edges: vec![[edge.x, edge.y, edge.z]] };
+        let other_edge = Vec3::new(20., 30., 20.);
+        for (why, wrong, expect) in [
+            ("left as it was", block.clone(), "not blended"),
+            ("another edge rounded", crate::fillet(&block, &[other_edge], 2.0).unwrap(), "away from the blended edges"),
+            ("a radius of 8 instead of 2", crate::fillet(&block, &[edge], 8.0).unwrap(), "away from the blended edges"),
+            (
+                "moved",
+                crate::transform(&crate::fillet(&block, &[edge], 2.0).unwrap(), Vec3::new(0.5, 0., 0.), Vec3::ZERO, Vec3::Z, 0.0).unwrap(),
+                "outside",
+            ),
+        ] {
+            let (r, events) = blended(&fillet, &block, Fixed::new(Ok(step(&wrong))).as_ref());
+            let message = r.unwrap_err().to_string();
+            assert!(message.contains("not supported yet") && message.contains("result was refused"), "{why}: {message}");
+            assert_eq!(events[0].outcome, FallbackOutcome::Refused, "{why}");
+            assert!(events[0].reason.as_deref().is_some_and(|r| r.contains(expect)), "{why}: {:?}", events[0].reason);
+        }
+    }
+
+    /// A chamfer built the wrong way round (a wedge added outside a convex edge, as a provider once
+    /// answered a fuzzed part with): inside the body's box, a plausible volume, new surface only
+    /// beside the edge, yet on the wrong side of the body.
+    #[test]
+    fn a_blend_built_the_wrong_way_round_is_refused() {
+        // A block with a step along its foot, so the box reaches past the top front edge.
+        let block = crate::boolean(&cube(Vec3::ZERO, Vec3::new(40., 30., 20.)), &cube(Vec3::new(0., -5., 0.), Vec3::new(40., 0., 5.)), BoolOp::Union)
+            .unwrap()
+            .unwrap();
+        let edge = Vec3::new(20., 0., 20.);
+        let chamfer = ProviderOperation::Chamfer { distance: 2.0, edges: vec![[edge.x, edge.y, edge.z]] };
+        let right = crate::chamfer(&block, &[edge], 2.0).unwrap();
+        let (r, events) = blended(&chamfer, &block, Fixed::new(Ok(step(&right))).as_ref());
+        assert!(r.is_ok(), "the right chamfer: {events:?}");
+        let wedge = crate::boolean(&block, &cube(Vec3::new(10., -1.5, 18.5), Vec3::new(30., 0., 20.)), BoolOp::Union).unwrap().unwrap();
+        let (r, events) = blended(&chamfer, &block, Fixed::new(Ok(step(&wedge))).as_ref());
+        assert!(r.is_err(), "material added outside a convex edge");
+        assert!(events[0].reason.as_deref().is_some_and(|r| r.contains("wrong way round")), "{:?}", events[0].reason);
+    }
+
+    #[test]
+    fn only_a_geometry_failure_of_a_blend_is_handed_over_and_only_to_a_provider_that_does_it() {
+        let (block, edge) = blend_case();
+        let fillet = ProviderOperation::Fillet { radius: 2.0, edges: vec![[edge.x, edge.y, edge.z]] };
+        let provider = Fixed::new(Ok(step(&crate::fillet(&block, &[edge], 2.0).unwrap())));
+        // Too large for the faces around it: the fit reduces or tapers it, nothing is asked.
+        let too_large = Err(KernelError::TooLarge("not supported yet: the blend is larger than the neighbouring faces".into()));
+        let (r, events) = capture_fallbacks(|| fall_back(&fillet, &[&block], too_large, 1.0, Some(provider.as_ref()), None));
+        assert!(matches!(r, Err(KernelError::TooLarge(_))) && events.is_empty() && provider.calls() == 0);
+        // A provider that only does Booleans is never asked for a fillet.
+        struct BooleansOnly(Arc<Fixed>);
+        impl GeometryProvider for BooleansOnly {
+            fn id(&self) -> &str {
+                "booleans"
+            }
+            fn version(&self) -> &str {
+                "1"
+            }
+            fn run(&self, request: &ProviderRequest) -> std::result::Result<ProviderReply, String> {
+                self.0.run(request)
+            }
+            fn does(&self, operation: &str) -> bool {
+                operation == "boolean"
+            }
+        }
+        let only = BooleansOnly(provider.clone());
+        let (r, events) = blended(&fillet, &block, &only);
+        assert_eq!(r.unwrap_err().to_string(), blend_failed().unwrap_err().to_string(), "the error as it was");
+        assert!(events.is_empty() && provider.calls() == 0);
+        // The wire form: the operation's name, its size and edge points, one operand.
+        let asked = request(&[&block], fillet.clone(), false).unwrap();
+        let wire = serde_json::to_value(&asked).unwrap();
+        assert_eq!((wire["op"].as_str(), wire["radius"].as_f64(), wire["operands"].as_array().map(Vec::len)), (Some("fillet"), Some(2.0), Some(1)));
+        assert_eq!(wire["edges"], serde_json::json!([[20.0, 0.0, 20.0]]));
+        let back: ProviderRequest = serde_json::from_value(wire).unwrap();
+        assert_eq!(back.operation, fillet);
+    }
+
+    #[test]
+    fn a_saved_fillet_is_offered_back_when_no_provider_makes_it() {
+        let (block, edge) = blend_case();
+        let fillet = ProviderOperation::Fillet { radius: 2.0, edges: vec![[edge.x, edge.y, edge.z]] };
+        let right = crate::fillet(&block, &[edge], 2.0).unwrap();
+        let saved = vec![SavedResult {
+            provider: "fixed".into(),
+            version: "1".into(),
+            operation: "fillet".into(),
+            operands: vec![OperandPrint::of(&block).unwrap()],
+            step: step(&right).into(),
+        }];
+        let (r, events) = capture_fallbacks(|| fall_back(&fillet, &[&block], blend_failed(), 1.0, None, Some(&saved)));
+        assert!(r.is_ok(), "{events:?}");
+        assert_eq!(events[0].outcome, FallbackOutcome::Saved);
+        // Not for another body.
+        let other = cube(Vec3::ZERO, Vec3::new(41., 30., 20.));
+        let (r, events) = capture_fallbacks(|| fall_back(&fillet, &[&other], blend_failed(), 1.0, None, Some(&saved)));
+        assert!(r.is_err() && events.is_empty());
+    }
+
+    #[test]
+    fn replaying_a_blend_request_runs_the_kernels_blend_then_the_provider() {
+        let (block, edge) = blend_case();
+        let fillet = ProviderOperation::Fillet { radius: 2.0, edges: vec![[edge.x, edge.y, edge.z]] };
+        let asked = request(&[&block], fillet, true).unwrap();
+        // The kernel can round this edge: nothing is handed over.
+        let replayed = replay(&asked, Some(Fixed::new(Err("unused".into())).as_ref())).unwrap();
+        assert_eq!((replayed.operation.as_str(), replayed.kernel_error.as_deref(), replayed.operands_from), ("fillet", None, "native"));
+        assert!(replayed.fallback.is_none());
     }
 }

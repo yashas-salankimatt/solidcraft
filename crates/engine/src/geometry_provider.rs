@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use solidcraft_kernel::provider::{GeometryProvider, ProviderOperation, ProviderReply, ProviderRequest};
+use solidcraft_kernel::provider::{GeometryProvider, ProviderReply, ProviderRequest};
 
 /// The protocol a provider program speaks.
 pub const PROTOCOL: &str = "solidcraft-geometry-provider/1";
@@ -93,10 +93,8 @@ impl GeometryProvider for ProcessProvider {
     }
 
     fn run(&self, request: &ProviderRequest) -> Result<ProviderReply, String> {
-        let op = match request.operation {
-            ProviderOperation::Boolean { .. } => "boolean",
-        };
-        if !self.operations.iter().any(|o| o == op) {
+        let op = request.operation.name();
+        if !self.does(op) {
             return Err(format!("it does not do `{op}` (it does {})", self.operations.join(", ")));
         }
         let mut message = serde_json::to_value(request).map_err(|e| e.to_string())?;
@@ -110,6 +108,10 @@ impl GeometryProvider for ProcessProvider {
 
     fn describe(&self) -> Value {
         json!({"program": self.program, "protocol": PROTOCOL, "operations": self.operations})
+    }
+
+    fn does(&self, operation: &str) -> bool {
+        self.operations.iter().any(|o| o == operation)
     }
 }
 
@@ -312,7 +314,7 @@ mod tests {
 
     #[cfg(unix)]
     fn request() -> ProviderRequest {
-        let operation = ProviderOperation::Boolean { kind: solidcraft_kernel::BoolOp::Cut };
+        let operation = solidcraft_kernel::provider::ProviderOperation::Boolean { kind: solidcraft_kernel::BoolOp::Cut };
         ProviderRequest { operation, operands: vec!["A".into(), "B".into()], tolerance_mm: 1e-6, native: Vec::new() }
     }
 

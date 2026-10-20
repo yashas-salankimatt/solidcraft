@@ -39,12 +39,17 @@ on one line from its standard output; then the program exits.
 
 | Request | Reply |
 |---|---|
-| `{"protocol": "solidcraft-geometry-provider/1", "op": "hello"}` | `{"ok": true, "provider": "occt", "version": "8.0.1", "operations": ["boolean"]}` |
+| `{"protocol": "solidcraft-geometry-provider/1", "op": "hello"}` | `{"ok": true, "provider": "occt", "version": "8.0.1", "operations": ["boolean", "fillet", "chamfer"]}` |
 | `{"protocol": …, "op": "boolean", "kind": "union" \| "cut" \| "intersect", "operands": [STEP, STEP], "tolerance_mm": 1e-6}` | `{"ok": true, "step": STEP}` |
+| `{"protocol": …, "op": "fillet", "radius": 2, "edges": [[x, y, z], …], "operands": [STEP], "tolerance_mm": 1e-6}` | `{"ok": true, "step": STEP}` |
+| `{"protocol": …, "op": "chamfer", "distance": 2, "edges": [[x, y, z], …], "operands": [STEP], "tolerance_mm": 1e-6}` | `{"ok": true, "step": STEP}` |
 | anything it cannot do | `{"ok": false, "error": "…"}` |
 
-- Operands and results are complete STEP files (AP214/AP242 text) in millimetres. The first
-  operand is the target and the second the tool. The result's solids are its pieces.
+- Operands and results are complete STEP files (AP214/AP242 text) in millimetres. A Boolean's
+  first operand is the target and the second the tool; a fillet or chamfer has one. The result's
+  solids are its pieces.
+- A fillet rounds, and a chamfer cuts back equally along both faces, the operand's edge nearest
+  each point of `edges` (a point on the edge, as the feature stores it), in millimetres.
 - `provider` is a short name (letters, digits, `-`, `_`, `.`); `version` is the provider's own.
   `operations` lists what it does; SolidCraft asks for nothing else.
 - The reply is the first line of standard output that starts with `{`. Standard error is the
@@ -54,16 +59,21 @@ on one line from its standard output; then the program exits.
 
 ## What is asked today
 
-Booleans of timeline features: the join, cut or intersection a feature makes with its target
-bodies (an extrude, revolve, loft, sweep, primitive, hole, pattern or combine, and the like). The kernel's internal Booleans
-(inside fillets, shells, clearance checks) and every other operation are not handed over yet.
+- Booleans of timeline features: the join, cut or intersection a feature makes with its target
+  bodies (an extrude, revolve, loft, sweep, primitive, hole, pattern or combine, and the like).
+- The Fillet feature's constant-radius round (type constant, any fit) and the Chamfer feature's
+  equal-distance chamfer. A radius too large for the faces around the edges is the kernel's own
+  answer, not a geometry failure, so a fillet's fit still reduces or tapers it; other fillet types,
+  chamfers by two distances or a distance and an angle, and blends inside a pattern are not handed
+  over yet.
 
-A Boolean is handed over only when all of these hold:
+The kernel's internal Booleans (inside fillets, shells, clearance checks) and every other
+operation are not handed over yet. An operation is handed over only when all of these hold:
 
-- a provider is installed (above);
+- a provider is installed (above) and lists the operation (`operations` in its hello);
 - the kernel failed with a geometry error (`KernelError::Failed` or `Internal`). Bad input
   (`Invalid`, a mesh body, a size too large) is not a geometry failure and is reported as before;
-- both operands are B-rep solids.
+- its operands are B-rep solids.
 
 With no provider installed, every operation, result and message is exactly what it was.
 
@@ -84,8 +94,24 @@ The provider's STEP text is read back with SolidCraft's STEP reader. The result 
    unchanged, a hole drilled in the wrong place or a join that lost its tool fails here even when
    its volume is plausible.
 
-None of these use the Boolean that just failed. A refused result is never published: the feature
-fails as it would have, and its error says why the provider's result was refused.
+A fillet or chamfer is judged against the body it was given and the edges it was asked for
+instead (`provider_blend`), without SolidCraft's blends:
+
+1. the same: every piece closed, the body sound;
+2. it lies within the body's box (a blend takes material off a convex edge and fills a concave
+   one, both inside it);
+3. its volume changes by no more than 4 × size² per millimetre of the blended edges (a round of a
+   20° edge changes about 2.4 × r², of a right angle 0.21 × r²);
+4. away from the blended edges (farther than 3 × the size from them, and from the edges
+   continuing them within 2°, which a blend follows) its surface is the body's, both ways:
+   nothing moved, dropped or added there. A round of the wrong edge, a much larger radius or a
+   moved body fails here;
+5. beside every edge asked for there is new surface: an edge the provider left as it was (as it
+   leaves the seam line of a round face, which is no edge to round) fails here, so a partial
+   result is never passed off as the blend.
+
+None of these use the operation that just failed. A refused result is never published: the
+feature fails as it would have, and its error says why the provider's result was refused.
 
 ## What a feature says
 
@@ -94,7 +120,7 @@ Every operation handed over is recorded as an event on the feature's result
 
 | Field | Meaning |
 |---|---|
-| `operation` | `boolean union`, `boolean cut` or `boolean intersect` |
+| `operation` | `boolean union`, `boolean cut`, `boolean intersect`, `fillet` or `chamfer` |
 | `kernel_error` | why SolidCraft's kernel could not do it |
 | `provider`, `provider_version` | which provider was asked |
 | `outcome` | `accepted` (kept), `refused` (its result failed the checks) or `failed` (it gave no result) |
@@ -131,8 +157,8 @@ A design saves the results a provider made for its features, so a computer witho
 
 - Saving (`file.save`, Save As, recovery autosaves) writes `provider_results`: the feature, the
   provider and its version, the operation, a digest of the design up to and including the feature
-  (`intent`), what the operation's two operands were like (volume, area, centre of mass and box)
-  and the result as STEP text, a deduplicated blob in a container. Nothing native to a provider
+  (`intent`), what the operation's operands (two for a Boolean, one for a blend) were like
+  (volume, area, centre of mass and box) and the result as STEP text, a deduplicated blob in a container. Nothing native to a provider
   is saved. A design no provider helped saves exactly as before.
 - Opening offers each feature the results saved for it, but only while the design up to that
   feature is exactly as it was saved: an edit to the feature or to anything before it (a
@@ -171,8 +197,8 @@ without the design: in SolidCraft, in a provider program, or by whoever works on
 ```text
 bundle.json              format solidcraft-geometry-fallback/1, app, source, provider, requests, error
 request-1.json           the request line, as a provider program reads it on standard input
-request-1-target.step    the operands, to open on their own
-request-1-tool.step
+request-1-target.step    the operands, to open on their own (a fillet's or chamfer's
+request-1-tool.step      one is request-1-body.step)
 request-1-target.scbrep  the same bodies in SolidCraft's own encoding: STEP refits intersection
 request-1-tool.scbrep    curves, and the kernel may do on the refit bodies what it could not do
 ```
@@ -180,12 +206,13 @@ request-1-tool.scbrep    curves, and the kernel may do on the refit bodies what 
 A provider program can be run on a bundle directly:
 `solidcraft-occt-provider < request-1.json`.
 
-A bundle holds no sketches, parameters, other bodies or file names. It does hold the two bodies
-each operation was given, so share it only where those bodies may go. SolidCraft writes it only
+A bundle holds no sketches, parameters, other bodies or file names. It does hold the bodies each
+operation was given, so share it only where those bodies may go. SolidCraft writes it only
 where it is asked to and never sends it anywhere.
 
 ## Not done yet
 
 - A preference for the provider program in the desktop app (today: the environment only).
 - The OCCT provider program itself, in its own repository.
-- Fillets and chamfers, shell and offset, sweeps and lofts, and import repair, one at a time.
+- Other fillet types, chamfers by two distances or an angle, then shell and offset, sweeps and
+  lofts, and import repair, one at a time.

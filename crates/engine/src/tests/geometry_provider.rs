@@ -13,11 +13,16 @@ use super::*;
 struct Answer {
     step: String,
     calls: AtomicUsize,
+    /// The operation it expects to be asked (`boolean union`).
+    expect: &'static str,
 }
 
 impl Answer {
     fn new(step: String) -> Arc<Self> {
-        Arc::new(Answer { step, calls: AtomicUsize::new(0) })
+        Self::to(step, "boolean union")
+    }
+    fn to(step: String, expect: &'static str) -> Arc<Self> {
+        Arc::new(Answer { step, calls: AtomicUsize::new(0), expect })
     }
 }
 
@@ -30,7 +35,7 @@ impl GeometryProvider for Answer {
     }
     fn run(&self, request: &ProviderRequest) -> std::result::Result<ProviderReply, String> {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        assert_eq!(request.operation.label(), "boolean union");
+        assert_eq!(request.operation.label(), self.expect);
         Ok(ProviderReply { step: self.step.clone() })
     }
 }
@@ -297,4 +302,91 @@ fn a_provider_result_travels_with_the_design_to_a_computer_without_the_provider(
     let mut s = Session::default();
     first(&mut s);
     assert!(!String::from_utf8_lossy(&solidcraft_io::write_design(&s.design())).contains("provider_results"));
+}
+
+/// A part whose fillet the kernel refuses (robustness seed 21): a revolved ring with a block
+/// joined to it and a hole through the block. The fillet names two of the block's bottom edges
+/// and the line along the hole where its round face is split, which is no edge to round.
+fn refused_fillet_part(s: &mut Session) -> Value {
+    run(s, "sketch.create", json!({"plane": "XZ"}));
+    run(s, "sketch.rectangle.two_point", json!({"p0": [5.0, 0], "p1": [17.5, 20.0]}));
+    run(s, "sketch.finish", json!({}));
+    run(s, "solid.revolve", json!({"angle": "360 deg", "axis": "Z"}));
+    run(s, "solid.box", json!({"corner": [12.5, -12.5, 0.0], "length": 17.5, "width": 12.5, "height": 10.0, "operation": "join"}));
+    run(s, "solid.hole", json!({"diameter": 3.0, "position": [30.0, -6.25, 5.0]}));
+    json!({"edges": [[30.0, -6.25, 0.0], [12.5, -6.123724356957944, 0.0], [21.25, -7.476888594444649, 4.1370142661540505]], "radius": 1.0})
+}
+
+/// The refused fillet, bundled: one operand (the body), and the request a provider program reads,
+/// with the radius and a point on each edge. A provider that answers with the body as it was is
+/// refused, and the fillet fails with the kernel's reason and the provider's.
+#[test]
+fn a_fillet_the_kernel_refuses_is_handed_over_and_a_body_left_as_it_was_is_refused() {
+    let folder = scratch("fillet");
+    let (fillet, error) = with_provider(None, || {
+        let mut s = Session::default();
+        let fillet = refused_fillet_part(&mut s);
+        let error = s.execute("solid.fillet", &fillet).unwrap_err().to_string();
+        assert!(error.contains("not supported yet") && !error.contains("geometry provider"), "{error}");
+        let out = run(&mut s, "geometry.fallback_bundle", json!({"command": "solid.fillet", "params": fillet, "folder": folder}));
+        assert_eq!(out["requests"], json!(1), "{out}");
+        assert_eq!(out["bundle"]["requests"][0]["operation"], json!("fillet"));
+        (fillet, error)
+    });
+    let dir = std::path::Path::new(&folder);
+    let mut files: Vec<String> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    files.sort();
+    assert_eq!(files, ["bundle.json", "request-1-body.scbrep", "request-1-body.step", "request-1.json"]);
+    let request: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("request-1.json")).unwrap()).unwrap();
+    assert_eq!((request["op"].clone(), request["radius"].clone()), (json!("fillet"), json!(1.0)));
+    assert_eq!(request["edges"], fillet["edges"]);
+    assert_eq!(request["operands"].as_array().map(Vec::len), Some(1));
+
+    // A provider that answers with the body as it was.
+    let body = std::fs::read_to_string(dir.join("request-1-body.step")).unwrap();
+    let provider = Answer::to(body, "fillet");
+    let p: Arc<dyn GeometryProvider> = provider.clone();
+    with_provider(Some(p), || {
+        let mut s = Session::default();
+        refused_fillet_part(&mut s);
+        let e = s.execute("solid.fillet", &fillet).unwrap_err().to_string();
+        assert!(e.starts_with(error.trim_end_matches('.')) || e.contains("not supported yet"), "{e}");
+        assert!(e.contains("result was refused") && e.contains("not blended"), "{e}");
+    });
+    assert_eq!(provider.calls.load(Ordering::Relaxed), 1);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A provider that lists only Booleans is never asked for a fillet: the error is the kernel's alone.
+#[test]
+fn a_provider_that_does_only_booleans_is_not_asked_for_a_fillet() {
+    struct BooleansOnly(Arc<Answer>);
+    impl GeometryProvider for BooleansOnly {
+        fn id(&self) -> &str {
+            "booleans"
+        }
+        fn version(&self) -> &str {
+            "1"
+        }
+        fn run(&self, request: &ProviderRequest) -> std::result::Result<ProviderReply, String> {
+            self.0.run(request)
+        }
+        fn does(&self, operation: &str) -> bool {
+            operation == "boolean"
+        }
+    }
+    let answer = Answer::to(String::new(), "fillet");
+    let p: Arc<dyn GeometryProvider> = Arc::new(BooleansOnly(answer.clone()));
+    let without = with_provider(None, || {
+        let mut s = Session::default();
+        let fillet = refused_fillet_part(&mut s);
+        s.execute("solid.fillet", &fillet).unwrap_err().to_string()
+    });
+    let with = with_provider(Some(p), || {
+        let mut s = Session::default();
+        let fillet = refused_fillet_part(&mut s);
+        s.execute("solid.fillet", &fillet).unwrap_err().to_string()
+    });
+    assert_eq!(with, without);
+    assert_eq!(answer.calls.load(Ordering::Relaxed), 0);
 }
